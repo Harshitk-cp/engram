@@ -1,0 +1,16 @@
+DROP TABLE IF EXISTS memory_associations;
+DROP TABLE IF EXISTS schema_activations;
+DROP TABLE IF EXISTS working_memory_activations;
+DROP TABLE IF EXISTS working_memory_sessions;
+DROP TABLE IF EXISTS schemas;
+DROP TABLE IF EXISTS procedures;
+DROP TABLE IF EXISTS episode_associations;
+DROP TABLE IF EXISTS episodes;
+DROP TABLE IF EXISTS feedback_signals;
+DROP TABLE IF EXISTS memory_policies;
+DROP TABLE IF EXISTS belief_contradictions;
+DROP TABLE IF EXISTS memories;
+DROP TABLE IF EXISTS agents;
+DROP TABLE IF EXISTS tenants;
+DROP TYPE IF EXISTS feedback_type;
+DROP TYPE IF EXISTS memory_type;

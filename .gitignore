@@ -1,0 +1,27 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+#OS
+.DS_Store
+
+# Test
+*.test
+*.out
+coverage.txt
+
+# Env files (secrets)
+.env
+.env.*.local
+.env.*.local.secret
+
+# IDE
+.vscode/
+
+# Go
+vendor/
+

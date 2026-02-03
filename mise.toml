@@ -1,0 +1,150 @@
+[tools]
+go = "1.24"
+golangci-lint = "2.1.6"
+
+[env]
+_.source = ['hack/current-commit.sh']
+ENGRAM_ENV = '.env.development.local'
+VERSION = 'snapshot'
+CGO_ENABLED = "0"
+
+[vars]
+ldflags = "-s -w -X github.com/Harshitk-cp/engram/internal/buildconfig.version=$VERSION -X github.com/Harshitk-cp/engram/internal/buildconfig.commit=$COMMIT"
+
+# ============================================================================
+# Dependencies
+# ============================================================================
+
+[tasks.go-tidy]
+run = 'go mod tidy'
+
+# ============================================================================
+# Build Tasks
+# ============================================================================
+
+[tasks."build:server"]
+run = 'go build -ldflags="{{vars.ldflags}}" -o dist/engram ./cmd/server/'
+depends = ["go-tidy"]
+description = "Build the server binary"
+
+[tasks.build]
+alias = "b"
+run = { tasks = ["build:server"] }
+description = "Build all binaries"
+
+# ============================================================================
+# Development Tasks
+# ============================================================================
+
+[tasks.run]
+alias = "r"
+run = 'go run -ldflags="{{vars.ldflags}}" ./cmd/server/'
+depends = ["go-tidy"]
+description = "Run the server in development mode"
+sources = ["cmd/**/*.go", "internal/**/*.go"]
+
+[tasks.serve]
+run = 'go run -ldflags="{{vars.ldflags}}" ./cmd/server/'
+depends = ["go-tidy"]
+description = "Run the server (alias for run)"
+
+[tasks."db:migrate"]
+run = 'migrate -path migrations -database "$DATABASE_URL" up'
+description = "Run database migrations"
+
+[tasks."db:migrate:down"]
+run = 'migrate -path migrations -database "$DATABASE_URL" down 1'
+description = "Rollback last migration"
+
+[tasks.seed]
+run = 'go run ./scripts/seed.go'
+description = "Seed database with demo data"
+
+# ============================================================================
+# Testing & Quality
+# ============================================================================
+
+[tasks."test:unit"]
+run = 'go test ./...'
+depends = ["go-tidy"]
+description = "Run unit tests"
+
+[tasks."test:integration"]
+run = 'go test -tags integration ./...'
+depends = ["go-tidy"]
+description = "Run integration tests"
+
+[tasks.test]
+alias = "t"
+run = { tasks = ["test:unit"] }
+description = "Run all tests"
+
+[tasks."lint:go"]
+run = 'golangci-lint run'
+depends = ["go-tidy"]
+description = "Lint Go code"
+
+[tasks."lint:migrations"]
+run = 'hack/validate-migrations.sh'
+description = "Validate migration files"
+
+[tasks.lint]
+alias = "l"
+run = { tasks = ["lint:go", "lint:migrations"] }
+description = "Run all linters"
+
+[tasks."format:go"]
+run = 'golangci-lint run --fix'
+description = "Format Go code"
+
+[tasks.format]
+alias = "f"
+run = { tasks = ["format:go"] }
+description = "Format all code"
+
+# ============================================================================
+# Docker Tasks
+# ============================================================================
+
+[tasks."docker:build"]
+run = 'docker build -t ghcr.io/harshitk-cp/engram:$VERSION .'
+description = "Build Docker image"
+
+[tasks."docker:build:distroless"]
+run = 'docker build -f Dockerfile.distroless -t ghcr.io/harshitk-cp/engram:$VERSION .'
+description = "Build distroless Docker image"
+
+[tasks."docker:up"]
+run = 'docker compose up -d'
+description = "Start development Docker stack"
+
+[tasks."docker:down"]
+run = 'docker compose down'
+description = "Stop Docker stack"
+
+[tasks."docker:logs"]
+run = 'docker compose logs -f server'
+description = "Tail server logs"
+
+[tasks."docker:prod:up"]
+run = 'docker compose -f deploy/docker/docker-compose.yaml up -d'
+description = "Start production Docker stack"
+
+[tasks."docker:prod:down"]
+run = 'docker compose -f deploy/docker/docker-compose.yaml down'
+description = "Stop production Docker stack"
+
+# ============================================================================
+# Release Tasks
+# ============================================================================
+
+[tasks."release:build"]
+run = '''
+mkdir -p dist
+GOOS=linux GOARCH=amd64 go build -ldflags="{{vars.ldflags}}" -o dist/engram-linux-amd64 ./cmd/server/
+GOOS=linux GOARCH=arm64 go build -ldflags="{{vars.ldflags}}" -o dist/engram-linux-arm64 ./cmd/server/
+GOOS=darwin GOARCH=amd64 go build -ldflags="{{vars.ldflags}}" -o dist/engram-darwin-amd64 ./cmd/server/
+GOOS=darwin GOARCH=arm64 go build -ldflags="{{vars.ldflags}}" -o dist/engram-darwin-arm64 ./cmd/server/
+'''
+depends = ["go-tidy"]
+description = "Build release binaries for all platforms"
