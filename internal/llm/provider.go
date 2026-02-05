@@ -6,6 +6,23 @@ import (
 	"github.com/Harshitk-cp/engram/internal/domain"
 )
 
+func provenanceTag(p domain.Provenance) string {
+	switch p {
+	case domain.ProvenanceUser:
+		return "USER"
+	case domain.ProvenanceTool:
+		return "TOOL"
+	case domain.ProvenanceAgent:
+		return "AGENT"
+	case domain.ProvenanceDerived:
+		return "DERIVED"
+	case domain.ProvenanceInferred:
+		return "INFERRED"
+	default:
+		return "UNKNOWN"
+	}
+}
+
 // Provider constants
 const (
 	ProviderOpenAI    = "openai"

@@ -18,10 +18,19 @@ type AgentStore interface {
 	GetByExternalID(ctx context.Context, externalID string, tenantID uuid.UUID) (*Agent, error)
 }
 
+type ScoringMode string
+
+const (
+	ScoringSimple   ScoringMode = "simple"
+	ScoringWeighted ScoringMode = "weighted"
+)
+
 type RecallOpts struct {
 	TopK          int
 	MemoryType    *MemoryType
 	MinConfidence float32
+	Scoring       ScoringMode
+	Explain       bool
 }
 
 type MemoryWithScore struct {
@@ -56,6 +65,30 @@ type BeliefContradiction struct {
 	DetectedAt       any
 }
 
+type ContradictionType string
+
+const (
+	ContradictionNone       ContradictionType = "none"
+	ContradictionHard       ContradictionType = "hard"
+	ContradictionSoft       ContradictionType = "soft"
+	ContradictionContextual ContradictionType = "contextual"
+	ContradictionTemporal   ContradictionType = "temporal"
+)
+
+func ValidContradictionType(c string) bool {
+	switch ContradictionType(c) {
+	case ContradictionNone, ContradictionHard, ContradictionSoft, ContradictionContextual, ContradictionTemporal:
+		return true
+	}
+	return false
+}
+
+type TensionResult struct {
+	Type         ContradictionType `json:"type"`
+	TensionScore float32           `json:"tension_score"`
+	Explanation  string            `json:"explanation"`
+}
+
 type ContradictionStore interface {
 	Create(ctx context.Context, beliefID, contradictedByID uuid.UUID) error
 	GetByBeliefID(ctx context.Context, beliefID uuid.UUID) ([]BeliefContradiction, error)
@@ -68,9 +101,10 @@ type Message struct {
 }
 
 type ExtractedMemory struct {
-	Type       MemoryType `json:"type"`
-	Content    string     `json:"content"`
-	Confidence float32    `json:"confidence"`
+	Type         MemoryType   `json:"type"`
+	Content      string       `json:"content"`
+	Confidence   float32      `json:"confidence"`
+	EvidenceType EvidenceType `json:"evidence_type,omitempty"`
 }
 
 // EpisodeExtraction represents structured information extracted from an episode.
@@ -92,6 +126,7 @@ type LLMClient interface {
 	Extract(ctx context.Context, conversation []Message) ([]ExtractedMemory, error)
 	Summarize(ctx context.Context, memories []Memory) (string, error)
 	CheckContradiction(ctx context.Context, stmtA, stmtB string) (bool, error)
+	CheckTension(ctx context.Context, stmtA, stmtB string) (*TensionResult, error)
 	ExtractEpisodeStructure(ctx context.Context, content string) (*EpisodeExtraction, error)
 	ExtractProcedure(ctx context.Context, content string) (*ProcedureExtraction, error)
 	DetectSchemaPattern(ctx context.Context, memories []Memory) (*SchemaExtraction, error)

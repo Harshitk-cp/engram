@@ -140,11 +140,12 @@ func TestProceduralService_LearnFromOutcome_Success(t *testing.T) {
 	svc, procedureStore, episodeStore, tenantID, agentID := setupProceduralTest()
 	ctx := context.Background()
 
-	// Create an episode
+	// Create an episode with sufficient importance for procedure extraction
 	episode := &domain.Episode{
-		AgentID:    agentID,
-		TenantID:   tenantID,
-		RawContent: "User was frustrated about slow loading. I acknowledged their frustration and then explained the solution.",
+		AgentID:         agentID,
+		TenantID:        tenantID,
+		RawContent:      "User was frustrated about slow loading. I acknowledged their frustration and then explained the solution.",
+		ImportanceScore: 0.8,
 	}
 	_ = episodeStore.Create(ctx, episode)
 

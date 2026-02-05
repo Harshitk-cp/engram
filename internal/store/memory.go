@@ -135,10 +135,11 @@ func (s *MemoryStore) Recall(ctx context.Context, embedding []float32, agentID u
 		        1 - (embedding <=> $%d) AS score
 		 FROM memories
 		 WHERE %s
-		 ORDER BY confidence DESC, created_at DESC
+		 ORDER BY embedding <=> $%d ASC
 		 LIMIT $%d`,
 		embeddingParam,
 		strings.Join(conditions, " AND "),
+		embeddingParam,
 		limitParam,
 	)
 

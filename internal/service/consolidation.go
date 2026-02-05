@@ -22,7 +22,7 @@ const (
 	SemanticSimilarityThreshold          = 0.85
 
 	// Schema formation
-	SchemaMinEvidenceCount = 3 // Minimum memories to form a schema
+	SchemaMinEvidenceCount = 5 // Minimum memories to form a schema
 
 	// Pruning
 	RedundancyThreshold         = 0.92 // Merge memories above this similarity
@@ -272,8 +272,10 @@ func (s *ConsolidationService) processEpisodes(ctx context.Context, agentID uuid
 			continue
 		}
 
-		// Extract structure if not already done
-		if (len(ep.Entities) == 0 || len(ep.Topics) == 0) && s.llmClient != nil {
+		// Only run expensive LLM extraction for important or outcome-bearing episodes
+		worthExtracting := ep.ImportanceScore >= 0.6 || ep.Outcome == domain.OutcomeSuccess || ep.Outcome == domain.OutcomeFailure
+
+		if (len(ep.Entities) == 0 || len(ep.Topics) == 0) && s.llmClient != nil && worthExtracting {
 			extraction, err := s.llmClient.ExtractEpisodeStructure(ctx, ep.RawContent)
 			if err == nil && extraction != nil {
 				ep.Entities = extraction.Entities
@@ -368,8 +370,13 @@ func (s *ConsolidationService) extractSemanticBeliefs(ctx context.Context, agent
 			continue
 		}
 
-		// Check if this episode already has derived semantic memories
 		if len(ep.DerivedSemanticIDs) > 0 {
+			continue
+		}
+
+		// Skip low-importance episodes with neutral outcomes
+		if ep.ImportanceScore < 0.6 && ep.Outcome != domain.OutcomeSuccess && ep.Outcome != domain.OutcomeFailure {
+			_ = s.episodeStore.UpdateConsolidationStatus(ctx, ep.ID, domain.ConsolidationAbstracted)
 			continue
 		}
 
@@ -408,13 +415,18 @@ func (s *ConsolidationService) extractSemanticBeliefs(ctx context.Context, agent
 				}
 			}
 
-			// Create new belief
+			// Create new belief with confidence from EvidenceType if available
+			confidence := belief.Confidence * SemanticExtractionConfidenceDiscount
+			if belief.EvidenceType != "" {
+				confidence = belief.EvidenceType.InitialConfidence() * SemanticExtractionConfidenceDiscount
+			}
+
 			mem := &domain.Memory{
 				AgentID:    agentID,
 				TenantID:   tenantID,
 				Content:    belief.Content,
 				Type:       belief.Type,
-				Confidence: belief.Confidence * SemanticExtractionConfidenceDiscount,
+				Confidence: confidence,
 				Source:     fmt.Sprintf("episode:%s", ep.ID),
 				Embedding:  embedding,
 			}
@@ -481,7 +493,11 @@ func (s *ConsolidationService) learnProcedures(ctx context.Context, agentID uuid
 			continue
 		}
 
-		// Check if procedure already derived from this episode
+		// Require minimum importance for procedure extraction
+		if ep.ImportanceScore < 0.6 {
+			continue
+		}
+
 		if len(ep.DerivedProceduralIDs) > 0 {
 			continue
 		}
@@ -567,17 +583,25 @@ func (s *ConsolidationService) formSchemas(ctx context.Context, agentID uuid.UUI
 	}
 
 	// Get all semantic memories for clustering
-	memories, err := s.memoryStore.GetByAgentForDecay(ctx, agentID)
-	if err != nil || len(memories) < SchemaMinEvidenceCount {
+	allMemories, err := s.memoryStore.GetByAgentForDecay(ctx, agentID)
+	if err != nil || len(allMemories) < SchemaMinEvidenceCount {
 		return result
 	}
 
-	// Filter to only memories with embeddings
+	// Filter to memories with embeddings, sufficient confidence, and stability
+	now := time.Now()
 	var memoriesWithEmbeddings []domain.Memory
-	for _, m := range memories {
-		if len(m.Embedding) > 0 {
-			memoriesWithEmbeddings = append(memoriesWithEmbeddings, m)
+	for _, m := range allMemories {
+		if len(m.Embedding) == 0 {
+			continue
 		}
+		if m.Confidence < 0.6 {
+			continue
+		}
+		if now.Sub(m.CreatedAt) < 24*time.Hour {
+			continue
+		}
+		memoriesWithEmbeddings = append(memoriesWithEmbeddings, m)
 	}
 
 	if len(memoriesWithEmbeddings) < SchemaMinEvidenceCount {

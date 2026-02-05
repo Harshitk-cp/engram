@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/Harshitk-cp/engram/internal/domain"
 	"github.com/Harshitk-cp/engram/internal/store"
@@ -146,53 +147,24 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 		if err != nil {
 			s.logger.Warn("failed to find similar beliefs", zap.Error(err))
 		} else if len(similar) > 0 {
-			// Check for reinforcement or contradiction
 			for _, existing := range similar {
-				// Check for contradiction using LLM
 				if s.llmClient != nil {
-					contradicts, err := s.llmClient.CheckContradiction(ctx, existing.Content, m.Content)
+					tension, err := s.llmClient.CheckTension(ctx, existing.Content, m.Content)
 					if err != nil {
-						s.logger.Warn("contradiction check failed", zap.Error(err))
+						s.logger.Warn("tension check failed", zap.Error(err))
 						continue
 					}
 
-					if contradicts {
-						// Handle contradiction: decrease old belief confidence, create new with lower confidence
-						newOldConfidence := existing.Confidence - ContradictionConfidencePenalty
-						if newOldConfidence < MinConfidence {
-							newOldConfidence = MinConfidence
-						}
-						if err := s.memoryStore.UpdateConfidence(ctx, existing.ID, newOldConfidence); err != nil {
-							s.logger.Warn("failed to update contradicted belief confidence", zap.Error(err))
-						}
-
-						// Set new belief confidence
-						m.Confidence = NewContradictingBeliefConfidence
-
-						// Create the new contradicting belief
-						if err := s.memoryStore.Create(ctx, m); err != nil {
-							return nil, err
-						}
-
-						// Record the contradiction
-						if s.contradictionStore != nil {
-							if err := s.contradictionStore.Create(ctx, existing.ID, m.ID); err != nil {
-								s.logger.Warn("failed to record contradiction", zap.Error(err))
-							}
-						}
-
-						// Enforce policies
-						if s.policyEnforcer != nil {
-							if err := s.policyEnforcer.EnforceOnCreate(ctx, m); err != nil {
-								s.logger.Warn("policy enforcement failed after memory creation", zap.Error(err))
-							}
-						}
-
+					handled, err := s.handleTension(ctx, tension, &existing, m, result)
+					if err != nil {
+						return nil, err
+					}
+					if handled {
 						return result, nil
 					}
 				}
 
-				// No contradiction detected with this similar belief - reinforce it
+				// No tension detected - reinforce
 				newConfidence := existing.Confidence + ReinforcementConfidenceBoost
 				if newConfidence > MaxConfidence {
 					newConfidence = MaxConfidence
@@ -202,7 +174,6 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 				if err := s.memoryStore.UpdateReinforcement(ctx, existing.ID, newConfidence, newCount); err != nil {
 					s.logger.Warn("failed to reinforce belief", zap.Error(err))
 				} else {
-					// Return the existing memory info as reinforced
 					m.ID = existing.ID
 					m.Confidence = newConfidence
 					m.ReinforcementCount = newCount
@@ -270,14 +241,43 @@ func (s *MemoryService) Recall(ctx context.Context, query string, agentID uuid.U
 		opts.MinConfidence = DefaultRecallMinConfidence
 	}
 
+	// Default scoring mode
+	if opts.Scoring == "" {
+		opts.Scoring = domain.ScoringWeighted
+	}
+
+	// For weighted scoring, fetch more candidates so re-ranking is meaningful
+	storeOpts := opts
+	if opts.Scoring == domain.ScoringWeighted {
+		storeOpts.TopK = opts.TopK * 3
+		if storeOpts.TopK < 30 {
+			storeOpts.TopK = 30
+		}
+	}
+
 	emb, err := s.embeddingClient.Embed(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 
-	memories, err := s.memoryStore.Recall(ctx, emb, agentID, tenantID, opts)
+	memories, err := s.memoryStore.Recall(ctx, emb, agentID, tenantID, storeOpts)
 	if err != nil {
 		return nil, err
+	}
+
+	// Apply composite scoring and re-ranking
+	if opts.Scoring == domain.ScoringWeighted && len(memories) > 0 {
+		scorer := s.buildScorer(ctx, agentID)
+		scored := scorer.ScoreAndRank(memories, timeNow())
+		memories = make([]domain.MemoryWithScore, 0, len(scored))
+		for _, sm := range scored {
+			memories = append(memories, sm.MemoryWithScore)
+		}
+	}
+
+	// Truncate to requested TopK after re-ranking
+	if len(memories) > opts.TopK {
+		memories = memories[:opts.TopK]
 	}
 
 	// Usage reinforcement: recalled memories get a small confidence boost
@@ -291,6 +291,88 @@ func (s *MemoryService) Recall(ctx context.Context, query string, agentID uuid.U
 
 	return memories, nil
 }
+
+// RecallWithExplain returns scored memories with detailed score breakdowns.
+func (s *MemoryService) RecallWithExplain(ctx context.Context, query string, agentID uuid.UUID, tenantID uuid.UUID, opts domain.RecallOpts) ([]ScoredMemory, error) {
+	if query == "" {
+		return nil, ErrRecallQueryEmpty
+	}
+	if agentID == uuid.Nil {
+		return nil, ErrRecallAgentIDMissing
+	}
+
+	if s.embeddingClient == nil {
+		return nil, errors.New("embedding client not configured")
+	}
+
+	if opts.MinConfidence == 0 {
+		opts.MinConfidence = DefaultRecallMinConfidence
+	}
+	if opts.Scoring == "" {
+		opts.Scoring = domain.ScoringWeighted
+	}
+
+	// Fetch extra candidates for re-ranking
+	storeOpts := opts
+	storeOpts.TopK = opts.TopK * 3
+	if storeOpts.TopK < 30 {
+		storeOpts.TopK = 30
+	}
+
+	emb, err := s.embeddingClient.Embed(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+
+	memories, err := s.memoryStore.Recall(ctx, emb, agentID, tenantID, storeOpts)
+	if err != nil {
+		return nil, err
+	}
+
+	scorer := s.buildScorer(ctx, agentID)
+	scored := scorer.ScoreAndRank(memories, timeNow())
+
+	if len(scored) > opts.TopK {
+		scored = scored[:opts.TopK]
+	}
+
+	// Usage reinforcement
+	for _, mem := range scored {
+		go func(id uuid.UUID) {
+			if err := s.memoryStore.IncrementAccessAndBoost(context.Background(), id, UsageReinforcementBoost); err != nil {
+				s.logger.Debug("failed to reinforce memory on usage", zap.String("memory_id", id.String()), zap.Error(err))
+			}
+		}(mem.ID)
+	}
+
+	return scored, nil
+}
+
+// PolicyWeightProvider is an optional interface that PolicyEnforcer can implement
+// to provide per-type importance weights for scoring.
+type PolicyWeightProvider interface {
+	GetTypeWeights(ctx context.Context, agentID uuid.UUID) map[domain.MemoryType]float64
+}
+
+// buildScorer creates a RecallScorer with per-agent policy weights if available.
+func (s *MemoryService) buildScorer(ctx context.Context, agentID uuid.UUID) *RecallScorer {
+	scorer := NewRecallScorer()
+
+	if s.policyEnforcer == nil {
+		return scorer
+	}
+
+	if ps, ok := s.policyEnforcer.(PolicyWeightProvider); ok {
+		weights := ps.GetTypeWeights(ctx, agentID)
+		if len(weights) > 0 {
+			scorer.TypeWeights = weights
+		}
+	}
+
+	return scorer
+}
+
+var timeNow = time.Now
 
 type ExtractResult struct {
 	ID         uuid.UUID         `json:"id,omitempty"`
@@ -313,10 +395,16 @@ func (s *MemoryService) Extract(ctx context.Context, agentID uuid.UUID, tenantID
 
 	var results []ExtractResult
 	for _, e := range extracted {
+		// Compute confidence from EvidenceType if present, otherwise use LLM confidence
+		confidence := e.Confidence
+		if e.EvidenceType != "" {
+			confidence = e.EvidenceType.InitialConfidence()
+		}
+
 		result := ExtractResult{
 			Type:       e.Type,
 			Content:    e.Content,
-			Confidence: e.Confidence,
+			Confidence: confidence,
 			Stored:     false,
 		}
 
@@ -326,7 +414,7 @@ func (s *MemoryService) Extract(ctx context.Context, agentID uuid.UUID, tenantID
 				TenantID:   tenantID,
 				Type:       e.Type,
 				Content:    e.Content,
-				Confidence: e.Confidence,
+				Confidence: confidence,
 				Source:     string(domain.SourceExtraction),
 			}
 			createResult, err := s.Create(ctx, mem)
@@ -355,4 +443,89 @@ func (s *MemoryService) Summarize(ctx context.Context, memories []domain.Memory)
 		return "", errors.New("LLM client not configured")
 	}
 	return s.llmClient.Summarize(ctx, memories)
+}
+
+// handleTension applies graded contradiction rules. Returns true if the tension was handled
+// (meaning the caller should not proceed with reinforcement).
+func (s *MemoryService) handleTension(ctx context.Context, tension *domain.TensionResult, existing *domain.MemoryWithScore, m *domain.Memory, result *CreateResult) (bool, error) {
+	if tension == nil {
+		return false, nil
+	}
+
+	switch tension.Type {
+	case domain.ContradictionHard:
+		if tension.TensionScore <= 0.7 {
+			return false, nil
+		}
+		// Demote old belief significantly, create new
+		newOldConfidence := existing.Confidence - ContradictionConfidencePenalty
+		if newOldConfidence < MinConfidence {
+			newOldConfidence = MinConfidence
+		}
+		if err := s.memoryStore.UpdateConfidence(ctx, existing.ID, newOldConfidence); err != nil {
+			s.logger.Warn("failed to update contradicted belief confidence", zap.Error(err))
+		}
+		m.Confidence = NewContradictingBeliefConfidence
+		if err := s.memoryStore.Create(ctx, m); err != nil {
+			return false, err
+		}
+		if s.contradictionStore != nil {
+			if err := s.contradictionStore.Create(ctx, existing.ID, m.ID); err != nil {
+				s.logger.Warn("failed to record contradiction", zap.Error(err))
+			}
+		}
+		if s.policyEnforcer != nil {
+			if err := s.policyEnforcer.EnforceOnCreate(ctx, m); err != nil {
+				s.logger.Warn("policy enforcement failed after memory creation", zap.Error(err))
+			}
+		}
+		return true, nil
+
+	case domain.ContradictionTemporal:
+		// Archive old belief, create new with boosted confidence (time evolution)
+		if err := s.memoryStore.Archive(ctx, existing.ID); err != nil {
+			s.logger.Warn("failed to archive temporally superseded belief", zap.Error(err))
+		}
+		if m.Confidence == 0 {
+			m.Confidence = NewContradictingBeliefConfidence
+		}
+		if err := s.memoryStore.Create(ctx, m); err != nil {
+			return false, err
+		}
+		if s.policyEnforcer != nil {
+			if err := s.policyEnforcer.EnforceOnCreate(ctx, m); err != nil {
+				s.logger.Warn("policy enforcement failed after memory creation", zap.Error(err))
+			}
+		}
+		return true, nil
+
+	case domain.ContradictionContextual:
+		// Both coexist - create the new belief without touching the old one
+		if err := s.memoryStore.Create(ctx, m); err != nil {
+			return false, err
+		}
+		if s.policyEnforcer != nil {
+			if err := s.policyEnforcer.EnforceOnCreate(ctx, m); err != nil {
+				s.logger.Warn("policy enforcement failed after memory creation", zap.Error(err))
+			}
+		}
+		return true, nil
+
+	case domain.ContradictionSoft:
+		if tension.TensionScore < 0.3 {
+			// Low tension - treat as reinforcement, fall through
+			return false, nil
+		}
+		// Moderate soft tension - create new without demoting old
+		if err := s.memoryStore.Create(ctx, m); err != nil {
+			return false, err
+		}
+		return true, nil
+
+	case domain.ContradictionNone:
+		// Reinforce existing, fall through
+		return false, nil
+	}
+
+	return false, nil
 }

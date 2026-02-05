@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/Harshitk-cp/engram/internal/domain"
 	"github.com/Harshitk-cp/engram/internal/store"
@@ -21,6 +22,9 @@ func newMockMemoryStore() *mockMemoryStore {
 
 func (m *mockMemoryStore) Create(ctx context.Context, mem *domain.Memory) error {
 	mem.ID = uuid.New()
+	now := time.Now()
+	mem.CreatedAt = now
+	mem.UpdatedAt = now
 	m.memories[mem.ID] = mem
 	return nil
 }
@@ -201,6 +205,14 @@ func (m *mockLLMClient) Summarize(ctx context.Context, memories []domain.Memory)
 
 func (m *mockLLMClient) CheckContradiction(ctx context.Context, stmtA, stmtB string) (bool, error) {
 	return m.checkContradictionResult, nil
+}
+
+func (m *mockLLMClient) CheckTension(ctx context.Context, stmtA, stmtB string) (*domain.TensionResult, error) {
+	return &domain.TensionResult{
+		Type:         domain.ContradictionNone,
+		TensionScore: 0,
+		Explanation:  "No tension detected",
+	}, nil
 }
 
 func (m *mockLLMClient) ExtractEpisodeStructure(ctx context.Context, content string) (*domain.EpisodeExtraction, error) {
