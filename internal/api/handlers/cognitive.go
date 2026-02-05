@@ -12,10 +12,15 @@ import (
 type CognitiveHandler struct {
 	decayService         *service.DecayService
 	consolidationService *service.ConsolidationService
+	confidenceService    *service.ConfidenceService
 }
 
 func NewCognitiveHandler(ds *service.DecayService, cs *service.ConsolidationService) *CognitiveHandler {
 	return &CognitiveHandler{decayService: ds, consolidationService: cs}
+}
+
+func (h *CognitiveHandler) SetConfidenceService(cs *service.ConfidenceService) {
+	h.confidenceService = cs
 }
 
 type triggerDecayRequest struct {
@@ -212,4 +217,145 @@ func (h *CognitiveHandler) GetMemoryHealth(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+type confidenceStatsResponse struct {
+	MemoryID           string  `json:"memory_id"`
+	RawConfidence      float32 `json:"raw_confidence"`
+	DecayedConfidence  float64 `json:"decayed_confidence"`
+	ReinforcementCount int     `json:"reinforcement_count"`
+	Provenance         string  `json:"provenance"`
+	HoursSinceAccess   float64 `json:"hours_since_access"`
+	DecayFactor        float64 `json:"decay_factor"`
+}
+
+func (h *CognitiveHandler) GetConfidenceStats(w http.ResponseWriter, r *http.Request) {
+	if h.confidenceService == nil {
+		writeError(w, http.StatusServiceUnavailable, "confidence service not available")
+		return
+	}
+
+	memoryIDStr := r.URL.Query().Get("memory_id")
+	if memoryIDStr == "" {
+		writeError(w, http.StatusBadRequest, "memory_id query parameter is required")
+		return
+	}
+
+	memoryID, err := uuid.Parse(memoryIDStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid memory_id format")
+		return
+	}
+
+	tenant := middleware.TenantFromContext(r.Context())
+	if tenant == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	stats, err := h.confidenceService.GetStats(r.Context(), memoryID, tenant.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	resp := confidenceStatsResponse{
+		MemoryID:           stats.MemoryID.String(),
+		RawConfidence:      stats.RawConfidence,
+		DecayedConfidence:  stats.DecayedConfidence,
+		ReinforcementCount: stats.ReinforcementCount,
+		Provenance:         stats.Provenance,
+		HoursSinceAccess:   stats.HoursSinceAccess,
+		DecayFactor:        stats.DecayFactor,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+type reinforceRequest struct {
+	MemoryID string `json:"memory_id"`
+}
+
+func (h *CognitiveHandler) ReinforceMemory(w http.ResponseWriter, r *http.Request) {
+	if h.confidenceService == nil {
+		writeError(w, http.StatusServiceUnavailable, "confidence service not available")
+		return
+	}
+
+	var req reinforceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.MemoryID == "" {
+		writeError(w, http.StatusBadRequest, "memory_id is required")
+		return
+	}
+
+	memoryID, err := uuid.Parse(req.MemoryID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid memory_id format")
+		return
+	}
+
+	tenant := middleware.TenantFromContext(r.Context())
+	if tenant == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	if err := h.confidenceService.Reinforce(r.Context(), memoryID, tenant.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "reinforced"})
+}
+
+type penalizeRequest struct {
+	MemoryID string `json:"memory_id"`
+}
+
+func (h *CognitiveHandler) PenalizeMemory(w http.ResponseWriter, r *http.Request) {
+	if h.confidenceService == nil {
+		writeError(w, http.StatusServiceUnavailable, "confidence service not available")
+		return
+	}
+
+	var req penalizeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if req.MemoryID == "" {
+		writeError(w, http.StatusBadRequest, "memory_id is required")
+		return
+	}
+
+	memoryID, err := uuid.Parse(req.MemoryID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid memory_id format")
+		return
+	}
+
+	tenant := middleware.TenantFromContext(r.Context())
+	if tenant == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	if err := h.confidenceService.Penalize(r.Context(), memoryID, tenant.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "penalized"})
 }

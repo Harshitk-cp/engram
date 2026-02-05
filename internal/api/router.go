@@ -79,6 +79,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	tunerSvc := service.NewTunerService(feedbackStore, policyStore, logger)
 	expirerSvc := service.NewExpirerService(memoryStore, policyStore, feedbackStore, logger)
 	decaySvc := service.NewDecayService(memoryStore, episodeStore, logger)
+	confidenceSvc := service.NewConfidenceService(memoryStore, logger)
 	episodeSvc := service.NewEpisodeService(episodeStore, agentStore, embeddingClient, llmClient, logger)
 	proceduralSvc := service.NewProceduralService(procedureStore, episodeStore, agentStore, embeddingClient, llmClient, logger)
 	schemaSvc := service.NewSchemaService(schemaStore, memoryStore, agentStore, embeddingClient, llmClient, logger)
@@ -104,6 +105,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	schemaHandler := handlers.NewSchemaHandler(schemaSvc)
 	wmHandler := handlers.NewWorkingMemoryHandler(wmSvc)
 	cognitiveHandler := handlers.NewCognitiveHandler(decaySvc, consolidationSvc)
+	cognitiveHandler.SetConfidenceService(confidenceSvc)
 	metacognitiveHandler := handlers.NewMetacognitiveHandler(metacognitiveSvc)
 	mindHandler := handlers.NewMindHandler(memoryStore, episodeStore, procedureStore, schemaStore)
 
@@ -213,6 +215,10 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 			r.Post("/reflect", metacognitiveHandler.Reflect)
 			r.Get("/confidence", metacognitiveHandler.AssessConfidence)
 			r.Get("/uncertainty", metacognitiveHandler.DetectUncertainty)
+			// Confidence lifecycle operations
+			r.Get("/confidence/stats", cognitiveHandler.GetConfidenceStats)
+			r.Post("/confidence/reinforce", cognitiveHandler.ReinforceMemory)
+			r.Post("/confidence/penalize", cognitiveHandler.PenalizeMemory)
 		})
 	})
 

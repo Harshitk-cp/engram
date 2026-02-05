@@ -15,6 +15,41 @@ const (
 	MemoryTypeConstraint MemoryType = "constraint"
 )
 
+type Provenance string
+
+const (
+	ProvenanceUser     Provenance = "user"
+	ProvenanceAgent    Provenance = "agent"
+	ProvenanceTool     Provenance = "tool"
+	ProvenanceDerived  Provenance = "derived"
+	ProvenanceInferred Provenance = "inferred"
+)
+
+func ValidProvenance(p string) bool {
+	switch Provenance(p) {
+	case ProvenanceUser, ProvenanceAgent, ProvenanceTool, ProvenanceDerived, ProvenanceInferred:
+		return true
+	}
+	return false
+}
+
+func (p Provenance) InitialConfidence() float32 {
+	switch p {
+	case ProvenanceUser:
+		return 0.9
+	case ProvenanceTool:
+		return 0.8
+	case ProvenanceAgent:
+		return 0.6
+	case ProvenanceDerived:
+		return 0.5
+	case ProvenanceInferred:
+		return 0.4
+	default:
+		return 0.5
+	}
+}
+
 func ValidMemoryType(t string) bool {
 	switch MemoryType(t) {
 	case MemoryTypePreference, MemoryTypeFact, MemoryTypeDecision, MemoryTypeConstraint:
@@ -33,6 +68,7 @@ type Memory struct {
 	EmbeddingProvider  string         `json:"embedding_provider,omitempty"`
 	EmbeddingModel     string         `json:"embedding_model,omitempty"`
 	Source             string         `json:"source,omitempty"`
+	Provenance         Provenance     `json:"provenance"`
 	Confidence         float32        `json:"confidence"`
 	Metadata           map[string]any `json:"metadata,omitempty"`
 	ExpiresAt          *time.Time     `json:"expires_at,omitempty"`
