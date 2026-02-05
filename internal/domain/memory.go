@@ -15,6 +15,40 @@ const (
 	MemoryTypeConstraint MemoryType = "constraint"
 )
 
+type EvidenceType string
+
+const (
+	EvidenceExplicit   EvidenceType = "explicit_statement"
+	EvidenceImplicit   EvidenceType = "implicit_inference"
+	EvidenceBehavioral EvidenceType = "behavioral_signal"
+)
+
+func (e EvidenceType) ConfidenceRange() (min, max float32) {
+	switch e {
+	case EvidenceExplicit:
+		return 0.85, 0.95
+	case EvidenceImplicit:
+		return 0.50, 0.75
+	case EvidenceBehavioral:
+		return 0.30, 0.55
+	default:
+		return 0.40, 0.60
+	}
+}
+
+func (e EvidenceType) InitialConfidence() float32 {
+	min, max := e.ConfidenceRange()
+	return (min + max) / 2
+}
+
+func ValidEvidenceType(e string) bool {
+	switch EvidenceType(e) {
+	case EvidenceExplicit, EvidenceImplicit, EvidenceBehavioral:
+		return true
+	}
+	return false
+}
+
 type Provenance string
 
 const (

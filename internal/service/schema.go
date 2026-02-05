@@ -16,7 +16,9 @@ import (
 
 // Schema service constants
 const (
-	MinClusterSize            = 3    // Minimum memories to form a schema
+	MinClusterSize            = 5    // Minimum memories to form a schema
+	MinEvidenceConfidence     = 0.6  // Minimum confidence for memories to count as evidence
+	MinEvidenceAge            = 24 * time.Hour // Minimum stability period
 	SchemaSimilarityThreshold = 0.7  // For finding similar schemas
 	SchemaConfidenceBoost     = 0.05 // Confidence boost per evidence
 	MaxSchemaConfidence       = 0.95 // Maximum schema confidence
@@ -76,15 +78,29 @@ type SchemaMatchInput struct {
 // DetectSchemas identifies patterns across semantic memories and creates schemas.
 func (s *SchemaService) DetectSchemas(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID) ([]domain.Schema, error) {
 	// Get all memories for the agent
-	memories, err := s.memoryStore.GetByAgentForDecay(ctx, agentID)
+	allMemories, err := s.memoryStore.GetByAgentForDecay(ctx, agentID)
 	if err != nil {
 		return nil, err
 	}
 
+	// Filter to memories that meet evidence quality thresholds
+	now := time.Now()
+	var memories []domain.Memory
+	for _, m := range allMemories {
+		if m.Confidence < MinEvidenceConfidence {
+			continue
+		}
+		if now.Sub(m.CreatedAt) < MinEvidenceAge {
+			continue
+		}
+		memories = append(memories, m)
+	}
+
 	if len(memories) < MinClusterSize {
-		s.logger.Debug("not enough memories for schema detection",
+		s.logger.Debug("not enough qualified memories for schema detection",
 			zap.String("agent_id", agentID.String()),
-			zap.Int("memory_count", len(memories)))
+			zap.Int("qualified_count", len(memories)),
+			zap.Int("total_count", len(allMemories)))
 		return nil, nil
 	}
 

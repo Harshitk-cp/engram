@@ -140,7 +140,8 @@ func (h *MemoryHandler) Delete(w http.ResponseWriter, r *http.Request) {
 
 type memoryWithDecayStatus struct {
 	domain.MemoryWithScore
-	DecayStatus string `json:"decay_status"`
+	DecayStatus    string                  `json:"decay_status"`
+	ScoreBreakdown *service.ScoreBreakdown `json:"score_breakdown,omitempty"`
 }
 
 type recallResponse struct {
@@ -205,24 +206,39 @@ func (h *MemoryHandler) Recall(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	memories, err := h.svc.Recall(r.Context(), query, agentID, tenant.ID, opts)
-	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrRecallQueryEmpty),
-			errors.Is(err, service.ErrRecallAgentIDMissing):
-			writeError(w, http.StatusBadRequest, err.Error())
-		default:
-			writeError(w, http.StatusInternalServerError, "failed to recall memories")
-		}
-		return
+	if scoring := r.URL.Query().Get("scoring"); scoring != "" {
+		opts.Scoring = domain.ScoringMode(scoring)
 	}
 
+	opts.Explain = r.URL.Query().Get("explain") == "true"
+
 	var memoriesWithStatus []memoryWithDecayStatus
-	for _, mem := range memories {
-		memoriesWithStatus = append(memoriesWithStatus, memoryWithDecayStatus{
-			MemoryWithScore: mem,
-			DecayStatus:     calculateDecayStatus(mem.Confidence),
-		})
+
+	if opts.Explain {
+		scored, err := h.svc.RecallWithExplain(r.Context(), query, agentID, tenant.ID, opts)
+		if err != nil {
+			handleRecallError(w, err)
+			return
+		}
+		for _, sm := range scored {
+			memoriesWithStatus = append(memoriesWithStatus, memoryWithDecayStatus{
+				MemoryWithScore: sm.MemoryWithScore,
+				DecayStatus:     calculateDecayStatus(sm.Confidence),
+				ScoreBreakdown:  sm.Breakdown,
+			})
+		}
+	} else {
+		memories, err := h.svc.Recall(r.Context(), query, agentID, tenant.ID, opts)
+		if err != nil {
+			handleRecallError(w, err)
+			return
+		}
+		for _, mem := range memories {
+			memoriesWithStatus = append(memoriesWithStatus, memoryWithDecayStatus{
+				MemoryWithScore: mem,
+				DecayStatus:     calculateDecayStatus(mem.Confidence),
+			})
+		}
 	}
 
 	if memoriesWithStatus == nil {
@@ -245,6 +261,17 @@ type extractRequest struct {
 type extractResponse struct {
 	Extracted []service.ExtractResult `json:"extracted"`
 	Count     int                     `json:"count"`
+}
+
+func handleRecallError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, service.ErrRecallQueryEmpty):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, service.ErrRecallAgentIDMissing):
+		writeError(w, http.StatusBadRequest, err.Error())
+	default:
+		writeError(w, http.StatusInternalServerError, "failed to recall memories")
+	}
 }
 
 func (h *MemoryHandler) Extract(w http.ResponseWriter, r *http.Request) {

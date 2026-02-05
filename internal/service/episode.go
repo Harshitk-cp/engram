@@ -25,6 +25,8 @@ const (
 	MaxAssociationsPerEpisode = 5
 	// ExtractionConfidenceDiscount is applied to auto-extracted beliefs
 	ExtractionConfidenceDiscount = 0.8
+	// ImportanceThreshold gates expensive LLM operations
+	ImportanceThreshold = 0.6
 )
 
 type EpisodeService struct {
@@ -121,8 +123,11 @@ func (s *EpisodeService) Encode(ctx context.Context, input EncodeInput) (*domain
 		}
 	}
 
-	// LLM extraction (entities, emotions, causal links)
-	if s.llmClient != nil {
+	// Gate expensive LLM extraction behind importance/outcome signals.
+	// Only run ExtractEpisodeStructure if outcome indicates it's worth it.
+	hasSignificantOutcome := input.Outcome != nil && (*input.Outcome == domain.OutcomeSuccess || *input.Outcome == domain.OutcomeFailure)
+
+	if s.llmClient != nil && hasSignificantOutcome {
 		extraction, err := s.llmClient.ExtractEpisodeStructure(ctx, input.RawContent)
 		if err != nil {
 			s.logger.Warn("failed to extract episode structure", zap.Error(err))
@@ -148,8 +153,8 @@ func (s *EpisodeService) Encode(ctx context.Context, input EncodeInput) (*domain
 		s.createAssociations(ctx, episode)
 	}
 
-	// Extract beliefs from the episode asynchronously
-	if s.llmClient != nil && s.memoryStore != nil {
+	// Only extract beliefs for important or outcome-bearing episodes
+	if s.llmClient != nil && s.memoryStore != nil && (episode.ImportanceScore >= ImportanceThreshold || hasSignificantOutcome) {
 		go s.extractBeliefsFromEpisode(context.Background(), episode)
 	}
 
@@ -202,12 +207,17 @@ func (s *EpisodeService) extractBeliefsFromEpisode(ctx context.Context, episode 
 	}
 
 	for _, belief := range extracted {
+		confidence := belief.Confidence * ExtractionConfidenceDiscount
+		if belief.EvidenceType != "" {
+			confidence = belief.EvidenceType.InitialConfidence() * ExtractionConfidenceDiscount
+		}
+
 		mem := &domain.Memory{
 			AgentID:    episode.AgentID,
 			TenantID:   episode.TenantID,
 			Content:    belief.Content,
 			Type:       belief.Type,
-			Confidence: belief.Confidence * ExtractionConfidenceDiscount,
+			Confidence: confidence,
 			Source:     "episode:" + episode.ID.String(),
 		}
 

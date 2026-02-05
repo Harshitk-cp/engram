@@ -1,26 +1,17 @@
 package llm
 
-// Shared LLM prompts used across all providers
-
-const classifyPrompt = `You are a memory classifier. Given the following text, classify it as exactly one of these types:
-- preference: user likes, dislikes, or preferred ways of doing things
-- fact: objective information about the user or their context
-- decision: a choice or decision that was made
-- constraint: a restriction, limitation, or rule that must be followed
-
-Respond with ONLY the type name (one word, lowercase). No explanation.
-
-Text: %s`
-
 const extractPrompt = `You are a memory extraction system. Analyze the following conversation and extract distinct memories.
 
 For each memory, determine:
 - type: one of "preference", "fact", "decision", "constraint"
 - content: a clear, concise statement of the memory
-- confidence: a float between 0.0 and 1.0 indicating how confident you are
+- evidence_type: how this belief was derived:
+  - "explicit_statement": user directly stated this
+  - "implicit_inference": inferred from indirect statements or patterns
+  - "behavioral_signal": observed from user actions or behavior
 
 Respond ONLY with a JSON array. No markdown, no explanation. Example:
-[{"type":"preference","content":"User prefers dark mode","confidence":0.9}]
+[{"type":"preference","content":"User prefers dark mode","evidence_type":"explicit_statement"}]
 
 If no memories can be extracted, respond with an empty array: []
 
@@ -28,6 +19,15 @@ Conversation:
 %s`
 
 const summarizePrompt = `You are a memory summarizer. Given the following memories, produce a single concise summary that captures the key information.
+
+Each memory is tagged with its provenance:
+- [USER] = directly stated by the user
+- [INFERRED] = inferred from behavior or context
+- [TOOL] = provided by an external tool
+- [AGENT] = determined by the agent
+- [DERIVED] = derived from other memories
+
+Weight [USER] and [TOOL] memories more heavily than [INFERRED] or [DERIVED].
 
 Memories:
 %s
@@ -39,6 +39,20 @@ Statement A: %s
 Statement B: %s
 
 Answer only "true" or "false". No explanation.`
+
+const tensionPrompt = `Analyze the relationship between these two statements:
+Statement A: %s
+Statement B: %s
+
+Classify the tension type:
+- none: No conflict, compatible statements
+- hard: Direct logical contradiction, both cannot be true
+- soft: Some tension but both could be true in different ways
+- contextual: Depends on unstated context or conditions
+- temporal: True at different times (belief evolution)
+
+Respond ONLY with JSON, no markdown:
+{"type":"none|hard|soft|contextual|temporal","tension_score":0.0,"explanation":"brief reason"}`
 
 const episodeExtractionPrompt = `Analyze this experience and extract structured information.
 

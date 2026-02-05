@@ -80,11 +80,14 @@ func (s *ProceduralService) LearnFromOutcome(ctx context.Context, episodeID uuid
 	}
 
 	if outcome != domain.OutcomeSuccess {
-		// For non-success outcomes, just record failure on any matching procedures
 		return s.recordFailureFromEpisode(ctx, episode)
 	}
 
-	// Extract procedure pattern from successful episode
+	// Only extract procedures from important episodes
+	if episode.ImportanceScore < 0.6 {
+		return nil
+	}
+
 	if s.llmClient == nil {
 		s.logger.Debug("no LLM client, skipping procedure extraction")
 		return nil

@@ -17,6 +17,8 @@ type MockClient struct {
 	SummarizeError                  error
 	CheckContradictionResponse      bool
 	CheckContradictionError         error
+	CheckTensionResponse            *domain.TensionResult
+	CheckTensionError               error
 	ExtractEpisodeStructureResponse *domain.EpisodeExtraction
 	ExtractEpisodeStructureError    error
 	ExtractProcedureResponse        *domain.ProcedureExtraction
@@ -29,6 +31,7 @@ type MockClient struct {
 	ExtractCalls                 [][]domain.Message
 	SummarizeCalls               [][]domain.Memory
 	CheckContradictionCalls      []struct{ A, B string }
+	CheckTensionCalls            []struct{ A, B string }
 	ExtractEpisodeStructureCalls []string
 	ExtractProcedureCalls        []string
 	DetectSchemaPatternCalls     [][]domain.Memory
@@ -39,6 +42,11 @@ func NewMockClient() *MockClient {
 		ClassifyResponse:  domain.MemoryTypeFact,
 		SummarizeResponse: "Mock summary",
 		ExtractResponse:   []domain.ExtractedMemory{},
+		CheckTensionResponse: &domain.TensionResult{
+			Type:         domain.ContradictionNone,
+			TensionScore: 0,
+			Explanation:  "No tension detected",
+		},
 		ExtractEpisodeStructureResponse: &domain.EpisodeExtraction{
 			Entities:        []string{},
 			Topics:          []string{},
@@ -94,6 +102,14 @@ func (c *MockClient) CheckContradiction(ctx context.Context, stmtA, stmtB string
 	return c.CheckContradictionResponse, nil
 }
 
+func (c *MockClient) CheckTension(ctx context.Context, stmtA, stmtB string) (*domain.TensionResult, error) {
+	c.CheckTensionCalls = append(c.CheckTensionCalls, struct{ A, B string }{stmtA, stmtB})
+	if c.CheckTensionError != nil {
+		return nil, c.CheckTensionError
+	}
+	return c.CheckTensionResponse, nil
+}
+
 func (c *MockClient) ExtractEpisodeStructure(ctx context.Context, content string) (*domain.EpisodeExtraction, error) {
 	c.ExtractEpisodeStructureCalls = append(c.ExtractEpisodeStructureCalls, content)
 	if c.ExtractEpisodeStructureError != nil {
@@ -128,6 +144,12 @@ func (c *MockClient) Reset() {
 	c.SummarizeError = nil
 	c.CheckContradictionResponse = false
 	c.CheckContradictionError = nil
+	c.CheckTensionResponse = &domain.TensionResult{
+		Type:         domain.ContradictionNone,
+		TensionScore: 0,
+		Explanation:  "No tension detected",
+	}
+	c.CheckTensionError = nil
 	c.ExtractEpisodeStructureResponse = &domain.EpisodeExtraction{
 		Entities:        []string{},
 		Topics:          []string{},
@@ -155,6 +177,7 @@ func (c *MockClient) Reset() {
 	c.ExtractCalls = nil
 	c.SummarizeCalls = nil
 	c.CheckContradictionCalls = nil
+	c.CheckTensionCalls = nil
 	c.ExtractEpisodeStructureCalls = nil
 	c.ExtractProcedureCalls = nil
 	c.DetectSchemaPatternCalls = nil

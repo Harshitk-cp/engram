@@ -160,3 +160,23 @@ func (s *PolicyService) EnforceOnCreate(ctx context.Context, m *domain.Memory) e
 
 	return nil
 }
+
+func (s *PolicyService) GetTypeWeights(ctx context.Context, agentID uuid.UUID) map[domain.MemoryType]float64 {
+	policies, err := s.policyStore.GetByAgentID(ctx, agentID)
+	if err != nil {
+		s.logger.Debug("failed to load policies for type weights", zap.Error(err))
+		return nil
+	}
+
+	weights := make(map[domain.MemoryType]float64)
+	for _, p := range policies {
+		if p.PriorityWeight > 0 {
+			weights[p.MemoryType] = p.PriorityWeight
+		}
+	}
+
+	if len(weights) == 0 {
+		return nil
+	}
+	return weights
+}

@@ -108,18 +108,14 @@ func (c *GeminiClient) complete(ctx context.Context, prompt string) (string, err
 }
 
 func (c *GeminiClient) Classify(ctx context.Context, content string) (domain.MemoryType, error) {
-	prompt := fmt.Sprintf(classifyPrompt, content)
-
-	result, err := c.complete(ctx, prompt)
+	extracted, err := c.Extract(ctx, []domain.Message{{Role: "user", Content: content}})
 	if err != nil {
-		return "", fmt.Errorf("classify: %w", err)
+		return domain.MemoryTypeFact, nil
 	}
-
-	memType := domain.MemoryType(strings.ToLower(strings.TrimSpace(result)))
-	if !domain.ValidMemoryType(string(memType)) {
-		return domain.MemoryTypeFact, nil // fallback
+	if len(extracted) > 0 && domain.ValidMemoryType(string(extracted[0].Type)) {
+		return extracted[0].Type, nil
 	}
-	return memType, nil
+	return domain.MemoryTypeFact, nil
 }
 
 func (c *GeminiClient) Extract(ctx context.Context, conversation []domain.Message) ([]domain.ExtractedMemory, error) {
@@ -149,13 +145,21 @@ func (c *GeminiClient) Extract(ctx context.Context, conversation []domain.Messag
 		return nil, fmt.Errorf("parse extraction result: %w (raw: %s)", err, result)
 	}
 
+	for i := range extracted {
+		if extracted[i].EvidenceType != "" {
+			extracted[i].Confidence = extracted[i].EvidenceType.InitialConfidence()
+		} else if extracted[i].Confidence == 0 {
+			extracted[i].Confidence = domain.EvidenceImplicit.InitialConfidence()
+		}
+	}
+
 	return extracted, nil
 }
 
 func (c *GeminiClient) Summarize(ctx context.Context, memories []domain.Memory) (string, error) {
 	var sb strings.Builder
 	for i, m := range memories {
-		sb.WriteString(fmt.Sprintf("%d. [%s] %s\n", i+1, m.Type, m.Content))
+		sb.WriteString(fmt.Sprintf("%d. [%s][%s] %s\n", i+1, provenanceTag(m.Provenance), m.Type, m.Content))
 	}
 
 	prompt := fmt.Sprintf(summarizePrompt, sb.String())
@@ -177,6 +181,31 @@ func (c *GeminiClient) CheckContradiction(ctx context.Context, stmtA, stmtB stri
 	}
 
 	return strings.ToLower(strings.TrimSpace(result)) == "true", nil
+}
+
+func (c *GeminiClient) CheckTension(ctx context.Context, stmtA, stmtB string) (*domain.TensionResult, error) {
+	prompt := fmt.Sprintf(tensionPrompt, stmtA, stmtB)
+
+	result, err := c.complete(ctx, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("check tension: %w", err)
+	}
+
+	result = strings.TrimPrefix(result, "```json")
+	result = strings.TrimPrefix(result, "```")
+	result = strings.TrimSuffix(result, "```")
+	result = strings.TrimSpace(result)
+
+	var tension domain.TensionResult
+	if err := json.Unmarshal([]byte(result), &tension); err != nil {
+		return nil, fmt.Errorf("parse tension result: %w (raw: %s)", err, result)
+	}
+
+	if !domain.ValidContradictionType(string(tension.Type)) {
+		tension.Type = domain.ContradictionNone
+	}
+
+	return &tension, nil
 }
 
 func (c *GeminiClient) ExtractEpisodeStructure(ctx context.Context, content string) (*domain.EpisodeExtraction, error) {
@@ -235,7 +264,7 @@ func (c *GeminiClient) DetectSchemaPattern(ctx context.Context, memories []domai
 
 	var sb strings.Builder
 	for i, m := range memories {
-		sb.WriteString(fmt.Sprintf("%d. [%s] %s\n", i+1, m.Type, m.Content))
+		sb.WriteString(fmt.Sprintf("%d. [%s][%s] %s\n", i+1, provenanceTag(m.Provenance), m.Type, m.Content))
 	}
 
 	prompt := fmt.Sprintf(schemaPatternPrompt, sb.String())
