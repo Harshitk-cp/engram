@@ -364,3 +364,108 @@ func (s *MemoryStore) IncrementAccessAndBoost(ctx context.Context, id uuid.UUID,
 	}
 	return nil
 }
+
+func (s *MemoryStore) GetByTier(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, tier domain.MemoryTier, limit int) ([]domain.Memory, error) {
+	thresholds := domain.TierConfidenceThresholds[tier]
+	if limit <= 0 {
+		limit = 100
+	}
+
+	rows, err := s.db.Query(ctx,
+		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, expires_at, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at
+		 FROM memories
+		 WHERE agent_id = $1 AND tenant_id = $2 AND confidence > $3 AND confidence <= $4
+		 ORDER BY confidence DESC
+		 LIMIT $5`,
+		agentID, tenantID, thresholds.Min, thresholds.Max, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var memories []domain.Memory
+	for rows.Next() {
+		var m domain.Memory
+		if err := rows.Scan(&m.ID, &m.AgentID, &m.TenantID, &m.Type, &m.Content, &m.EmbeddingProvider, &m.EmbeddingModel, &m.Source, &m.Provenance, &m.Confidence, &m.Metadata, &m.ExpiresAt, &m.LastVerifiedAt, &m.ReinforcementCount, &m.DecayRate, &m.LastAccessedAt, &m.AccessCount, &m.CreatedAt, &m.UpdatedAt); err != nil {
+			return nil, err
+		}
+		memories = append(memories, m)
+	}
+	return memories, rows.Err()
+}
+
+func (s *MemoryStore) GetTierCounts(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID) (map[domain.MemoryTier]int, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT
+			CASE
+				WHEN confidence > 0.85 THEN 'hot'
+				WHEN confidence > 0.70 THEN 'warm'
+				WHEN confidence > 0.40 THEN 'cold'
+				ELSE 'archive'
+			END as tier,
+			COUNT(*) as count
+		 FROM memories
+		 WHERE agent_id = $1 AND tenant_id = $2
+		 GROUP BY tier`,
+		agentID, tenantID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	counts := make(map[domain.MemoryTier]int)
+	for rows.Next() {
+		var tier string
+		var count int
+		if err := rows.Scan(&tier, &count); err != nil {
+			return nil, err
+		}
+		counts[domain.MemoryTier(tier)] = count
+	}
+	return counts, rows.Err()
+}
+
+func (s *MemoryStore) SetNeedsReview(ctx context.Context, id uuid.UUID, needsReview bool) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE memories SET needs_review = $1, updated_at = NOW() WHERE id = $2`,
+		needsReview, id,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *MemoryStore) GetNeedsReview(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, limit int) ([]domain.Memory, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+
+	rows, err := s.db.Query(ctx,
+		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, expires_at, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at
+		 FROM memories
+		 WHERE agent_id = $1 AND tenant_id = $2 AND needs_review = true
+		 ORDER BY updated_at DESC
+		 LIMIT $3`,
+		agentID, tenantID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var memories []domain.Memory
+	for rows.Next() {
+		var m domain.Memory
+		if err := rows.Scan(&m.ID, &m.AgentID, &m.TenantID, &m.Type, &m.Content, &m.EmbeddingProvider, &m.EmbeddingModel, &m.Source, &m.Provenance, &m.Confidence, &m.Metadata, &m.ExpiresAt, &m.LastVerifiedAt, &m.ReinforcementCount, &m.DecayRate, &m.LastAccessedAt, &m.AccessCount, &m.CreatedAt, &m.UpdatedAt); err != nil {
+			return nil, err
+		}
+		memories = append(memories, m)
+	}
+	return memories, rows.Err()
+}

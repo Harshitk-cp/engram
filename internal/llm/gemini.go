@@ -297,3 +297,160 @@ func (c *GeminiClient) DetectSchemaPattern(ctx context.Context, memories []domai
 
 	return &extraction, nil
 }
+
+func (c *GeminiClient) DetectImplicitFeedback(ctx context.Context, memories []domain.Memory, conversation []domain.Message) ([]domain.ImplicitFeedback, error) {
+	if len(memories) == 0 || len(conversation) == 0 {
+		return nil, nil
+	}
+
+	var memSb strings.Builder
+	for _, m := range memories {
+		memSb.WriteString(fmt.Sprintf("- ID: %s\n  Content: %s\n", m.ID.String(), m.Content))
+	}
+
+	var convSb strings.Builder
+	for _, msg := range conversation {
+		convSb.WriteString(msg.Role)
+		convSb.WriteString(": ")
+		convSb.WriteString(msg.Content)
+		convSb.WriteString("\n")
+	}
+
+	prompt := fmt.Sprintf(implicitFeedbackPrompt, memSb.String(), convSb.String())
+
+	result, err := c.complete(ctx, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("detect implicit feedback: %w", err)
+	}
+
+	result = strings.TrimPrefix(result, "```json")
+	result = strings.TrimPrefix(result, "```")
+	result = strings.TrimSuffix(result, "```")
+	result = strings.TrimSpace(result)
+
+	var responses []struct {
+		MemoryID   string  `json:"memory_id"`
+		SignalType string  `json:"signal_type"`
+		Confidence float32 `json:"confidence"`
+		Evidence   string  `json:"evidence"`
+	}
+	if err := json.Unmarshal([]byte(result), &responses); err != nil {
+		return nil, fmt.Errorf("parse implicit feedback result: %w (raw: %s)", err, result)
+	}
+
+	var feedbacks []domain.ImplicitFeedback
+	for _, r := range responses {
+		memID, err := parseUUID(r.MemoryID)
+		if err != nil {
+			continue
+		}
+		signalType := domain.FeedbackType(r.SignalType)
+		if !domain.ValidFeedbackType(string(signalType)) {
+			continue
+		}
+		feedbacks = append(feedbacks, domain.ImplicitFeedback{
+			MemoryID:   memID,
+			SignalType: signalType,
+			Confidence: r.Confidence,
+			Evidence:   r.Evidence,
+		})
+	}
+
+	return feedbacks, nil
+}
+
+func (c *GeminiClient) ExtractEntities(ctx context.Context, content string) ([]domain.ExtractedEntity, error) {
+	prompt := fmt.Sprintf(entityExtractionPrompt, content)
+
+	result, err := c.complete(ctx, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("extract entities: %w", err)
+	}
+
+	result = strings.TrimPrefix(result, "```json")
+	result = strings.TrimPrefix(result, "```")
+	result = strings.TrimSuffix(result, "```")
+	result = strings.TrimSpace(result)
+
+	var responses []struct {
+		Name       string `json:"name"`
+		EntityType string `json:"entity_type"`
+		Role       string `json:"role"`
+	}
+	if err := json.Unmarshal([]byte(result), &responses); err != nil {
+		return nil, fmt.Errorf("parse entity extraction result: %w (raw: %s)", err, result)
+	}
+
+	var entities []domain.ExtractedEntity
+	for _, r := range responses {
+		entityType := domain.EntityType(r.EntityType)
+		if !domain.ValidEntityType(r.EntityType) {
+			entityType = domain.EntityOther
+		}
+		role := domain.MentionType(r.Role)
+		if r.Role != string(domain.MentionSubject) && r.Role != string(domain.MentionObject) && r.Role != string(domain.MentionContext) {
+			role = domain.MentionContext
+		}
+		entities = append(entities, domain.ExtractedEntity{
+			Name:       r.Name,
+			EntityType: entityType,
+			Role:       role,
+		})
+	}
+
+	return entities, nil
+}
+
+func (c *GeminiClient) DetectRelationships(ctx context.Context, memory *domain.Memory, similarMemories []domain.MemoryWithScore) ([]domain.DetectedRelationship, error) {
+	if memory == nil || len(similarMemories) == 0 {
+		return nil, nil
+	}
+
+	var similarSb strings.Builder
+	for _, m := range similarMemories {
+		similarSb.WriteString(fmt.Sprintf("- ID: %s\n  Content: %s\n  Similarity: %.2f\n", m.ID.String(), m.Content, m.Score))
+	}
+
+	prompt := fmt.Sprintf(relationshipDetectionPrompt, memory.Content, memory.ID.String(), similarSb.String())
+
+	result, err := c.complete(ctx, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("detect relationships: %w", err)
+	}
+
+	result = strings.TrimPrefix(result, "```json")
+	result = strings.TrimPrefix(result, "```")
+	result = strings.TrimSuffix(result, "```")
+	result = strings.TrimSpace(result)
+
+	var responses []struct {
+		TargetID     string  `json:"target_id"`
+		RelationType string  `json:"relation_type"`
+		Strength     float32 `json:"strength"`
+		Reason       string  `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(result), &responses); err != nil {
+		return nil, fmt.Errorf("parse relationship detection result: %w (raw: %s)", err, result)
+	}
+
+	var relationships []domain.DetectedRelationship
+	for _, r := range responses {
+		targetID, err := parseUUID(r.TargetID)
+		if err != nil {
+			continue
+		}
+		relType := domain.RelationType(r.RelationType)
+		if !domain.ValidRelationType(r.RelationType) {
+			continue
+		}
+		relationships = append(relationships, domain.DetectedRelationship{
+			SourceID:     memory.ID,
+			TargetID:     targetID,
+			RelationType: relType,
+			Strength:     r.Strength,
+			Reason:       r.Reason,
+		})
+	}
+
+	return relationships, nil
+}

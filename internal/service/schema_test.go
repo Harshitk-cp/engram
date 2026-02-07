@@ -215,6 +215,22 @@ func (m *mockMemoryStoreForSchema) IncrementAccessAndBoost(ctx context.Context, 
 	return nil
 }
 
+func (m *mockMemoryStoreForSchema) GetByTier(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, tier domain.MemoryTier, limit int) ([]domain.Memory, error) {
+	return nil, nil
+}
+
+func (m *mockMemoryStoreForSchema) GetTierCounts(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID) (map[domain.MemoryTier]int, error) {
+	return nil, nil
+}
+
+func (m *mockMemoryStoreForSchema) SetNeedsReview(ctx context.Context, id uuid.UUID, needsReview bool) error {
+	return nil
+}
+
+func (m *mockMemoryStoreForSchema) GetNeedsReview(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, limit int) ([]domain.Memory, error) {
+	return nil, nil
+}
+
 func setupSchemaTest() (*SchemaService, *mockSchemaStore, *mockMemoryStoreForSchema, uuid.UUID, uuid.UUID) {
 	agentStore := newMockAgentStore()
 	schemaStore := newMockSchemaStore()

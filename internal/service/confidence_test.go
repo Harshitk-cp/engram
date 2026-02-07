@@ -105,6 +105,22 @@ func (m *mockMemoryStoreForConfidence) IncrementAccessAndBoost(ctx context.Conte
 	return nil
 }
 
+func (m *mockMemoryStoreForConfidence) GetByTier(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, tier domain.MemoryTier, limit int) ([]domain.Memory, error) {
+	return nil, nil
+}
+
+func (m *mockMemoryStoreForConfidence) GetTierCounts(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID) (map[domain.MemoryTier]int, error) {
+	return nil, nil
+}
+
+func (m *mockMemoryStoreForConfidence) SetNeedsReview(ctx context.Context, id uuid.UUID, needsReview bool) error {
+	return nil
+}
+
+func (m *mockMemoryStoreForConfidence) GetNeedsReview(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, limit int) ([]domain.Memory, error) {
+	return nil, nil
+}
+
 func TestConfidenceService_Reinforce(t *testing.T) {
 	logger := zap.NewNop()
 	agentID := uuid.New()

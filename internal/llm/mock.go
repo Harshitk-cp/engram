@@ -25,16 +25,25 @@ type MockClient struct {
 	ExtractProcedureError           error
 	DetectSchemaPatternResponse     *domain.SchemaExtraction
 	DetectSchemaPatternError        error
+	DetectImplicitFeedbackResponse  []domain.ImplicitFeedback
+	DetectImplicitFeedbackError     error
+	ExtractEntitiesResponse         []domain.ExtractedEntity
+	ExtractEntitiesError            error
+	DetectRelationshipsResponse     []domain.DetectedRelationship
+	DetectRelationshipsError        error
 
 	// Call tracking for assertions
-	ClassifyCalls                []string
-	ExtractCalls                 [][]domain.Message
-	SummarizeCalls               [][]domain.Memory
-	CheckContradictionCalls      []struct{ A, B string }
-	CheckTensionCalls            []struct{ A, B string }
-	ExtractEpisodeStructureCalls []string
-	ExtractProcedureCalls        []string
-	DetectSchemaPatternCalls     [][]domain.Memory
+	ClassifyCalls                 []string
+	ExtractCalls                  [][]domain.Message
+	SummarizeCalls                [][]domain.Memory
+	CheckContradictionCalls       []struct{ A, B string }
+	CheckTensionCalls             []struct{ A, B string }
+	ExtractEpisodeStructureCalls  []string
+	ExtractProcedureCalls         []string
+	DetectSchemaPatternCalls      [][]domain.Memory
+	DetectImplicitFeedbackCalls   []struct{ Memories []domain.Memory; Conversation []domain.Message }
+	ExtractEntitiesCalls          []string
+	DetectRelationshipsCalls      []struct{ Memory *domain.Memory; Similar []domain.MemoryWithScore }
 }
 
 func NewMockClient() *MockClient {
@@ -134,6 +143,30 @@ func (c *MockClient) DetectSchemaPattern(ctx context.Context, memories []domain.
 	return c.DetectSchemaPatternResponse, nil
 }
 
+func (c *MockClient) DetectImplicitFeedback(ctx context.Context, memories []domain.Memory, conversation []domain.Message) ([]domain.ImplicitFeedback, error) {
+	c.DetectImplicitFeedbackCalls = append(c.DetectImplicitFeedbackCalls, struct{ Memories []domain.Memory; Conversation []domain.Message }{memories, conversation})
+	if c.DetectImplicitFeedbackError != nil {
+		return nil, c.DetectImplicitFeedbackError
+	}
+	return c.DetectImplicitFeedbackResponse, nil
+}
+
+func (c *MockClient) ExtractEntities(ctx context.Context, content string) ([]domain.ExtractedEntity, error) {
+	c.ExtractEntitiesCalls = append(c.ExtractEntitiesCalls, content)
+	if c.ExtractEntitiesError != nil {
+		return nil, c.ExtractEntitiesError
+	}
+	return c.ExtractEntitiesResponse, nil
+}
+
+func (c *MockClient) DetectRelationships(ctx context.Context, memory *domain.Memory, similarMemories []domain.MemoryWithScore) ([]domain.DetectedRelationship, error) {
+	c.DetectRelationshipsCalls = append(c.DetectRelationshipsCalls, struct{ Memory *domain.Memory; Similar []domain.MemoryWithScore }{memory, similarMemories})
+	if c.DetectRelationshipsError != nil {
+		return nil, c.DetectRelationshipsError
+	}
+	return c.DetectRelationshipsResponse, nil
+}
+
 // Reset clears all recorded calls and resets responses to defaults.
 func (c *MockClient) Reset() {
 	c.ClassifyResponse = domain.MemoryTypeFact
@@ -173,6 +206,12 @@ func (c *MockClient) Reset() {
 		Confidence:         0.8,
 	}
 	c.DetectSchemaPatternError = nil
+	c.DetectImplicitFeedbackResponse = nil
+	c.DetectImplicitFeedbackError = nil
+	c.ExtractEntitiesResponse = nil
+	c.ExtractEntitiesError = nil
+	c.DetectRelationshipsResponse = nil
+	c.DetectRelationshipsError = nil
 	c.ClassifyCalls = nil
 	c.ExtractCalls = nil
 	c.SummarizeCalls = nil
@@ -181,4 +220,7 @@ func (c *MockClient) Reset() {
 	c.ExtractEpisodeStructureCalls = nil
 	c.ExtractProcedureCalls = nil
 	c.DetectSchemaPatternCalls = nil
+	c.DetectImplicitFeedbackCalls = nil
+	c.ExtractEntitiesCalls = nil
+	c.DetectRelationshipsCalls = nil
 }

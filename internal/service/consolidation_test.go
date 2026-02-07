@@ -105,6 +105,22 @@ func (m *mockMemoryStoreForConsolidation) IncrementAccessAndBoost(ctx context.Co
 	return nil
 }
 
+func (m *mockMemoryStoreForConsolidation) GetByTier(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, tier domain.MemoryTier, limit int) ([]domain.Memory, error) {
+	return nil, nil
+}
+
+func (m *mockMemoryStoreForConsolidation) GetTierCounts(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID) (map[domain.MemoryTier]int, error) {
+	return nil, nil
+}
+
+func (m *mockMemoryStoreForConsolidation) SetNeedsReview(ctx context.Context, id uuid.UUID, needsReview bool) error {
+	return nil
+}
+
+func (m *mockMemoryStoreForConsolidation) GetNeedsReview(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, limit int) ([]domain.Memory, error) {
+	return nil, nil
+}
+
 type mockEpisodeStoreForConsolidation struct {
 	episodes     []domain.Episode
 	archived     []uuid.UUID
@@ -570,6 +586,10 @@ func TestConsolidationService_ApplyForgetting(t *testing.T) {
 		nil,
 		logger,
 	)
+
+	// Set decay for forgetting stage
+	decaySvc := NewDecayService(memStore, nil, logger)
+	svc.SetDecayService(decaySvc)
 
 	result, err := svc.Consolidate(context.Background(), agentID, tenantID, ConsolidationScopeFull)
 	if err != nil {

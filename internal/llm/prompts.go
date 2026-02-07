@@ -123,3 +123,70 @@ Respond ONLY with JSON, no markdown fences:
   "applicable_contexts": ["debugging", "architecture"],
   "confidence": 0.8
 }`
+
+const implicitFeedbackPrompt = `Analyze this conversation for implicit feedback signals about the agent's recalled memories.
+
+Recalled memories that were used:
+%s
+
+Conversation:
+%s
+
+Detect implicit feedback patterns:
+- "contradicted": User directly corrects or contradicts a memory (e.g., "No, I actually prefer X now", "That's not right")
+- "helpful": User confirms or appreciates the memory (e.g., "Yes, exactly!", "That's right", "Perfect")
+- "unhelpful": User re-asks a similar question suggesting previous answer was not useful
+- "ignored": Agent used memory but user changed topic or didn't engage with that aspect
+- "outdated": User indicates something has changed (e.g., "I used to but not anymore", "That was before")
+
+For each detected signal, provide:
+1. memory_id: which memory the signal applies to
+2. signal_type: one of "contradicted", "helpful", "unhelpful", "ignored", "outdated"
+3. confidence: 0.0-1.0 how confident in this detection
+4. evidence: quote or description of evidence
+
+Respond ONLY with JSON array, no markdown fences:
+[{"memory_id":"uuid","signal_type":"helpful","confidence":0.8,"evidence":"User said 'exactly!'"}]
+
+If no implicit feedback detected, return empty array: []`
+
+const entityExtractionPrompt = `Extract key entities from this content.
+
+Content: %s
+
+For each entity, identify:
+1. name: The entity's name or identifier
+2. entity_type: One of "person", "organization", "tool", "concept", "location", "event", "product", "other"
+3. role: The entity's role in the content - "subject" (main actor), "object" (acted upon), or "context" (background)
+
+Respond ONLY with JSON array, no markdown fences:
+[{"name":"John","entity_type":"person","role":"subject"}]
+
+If no entities found, return empty array: []`
+
+const relationshipDetectionPrompt = `Analyze the relationship between a new memory and existing similar memories.
+
+New memory:
+Content: %s
+ID: %s
+
+Similar memories:
+%s
+
+For each relationship found, determine:
+1. target_id: The ID of the related memory
+2. relation_type: One of:
+   - "causal": The new memory is caused by or causes the other
+   - "temporal": Related in time/sequence
+   - "thematic": Share common themes
+   - "contradicts": Contains conflicting information
+   - "supports": Reinforces/confirms the other
+   - "derived_from": New memory is derived from the other
+   - "supersedes": New memory replaces/updates the other
+3. strength: 0.0-1.0 how strong the relationship is
+4. reason: Brief explanation
+
+Respond ONLY with JSON array, no markdown fences:
+[{"target_id":"uuid","relation_type":"thematic","strength":0.7,"reason":"Both about user preferences"}]
+
+If no relationships found, return empty array: []`

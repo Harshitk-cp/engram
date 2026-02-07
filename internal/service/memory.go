@@ -43,6 +43,10 @@ const (
 	UsageReinforcementBoost = 0.02
 )
 
+type GraphBuilder interface {
+	OnMemoryCreated(ctx context.Context, memory *domain.Memory) error
+}
+
 type MemoryService struct {
 	memoryStore        domain.MemoryStore
 	agentStore         domain.AgentStore
@@ -50,6 +54,7 @@ type MemoryService struct {
 	llmClient          domain.LLMClient
 	contradictionStore domain.ContradictionStore
 	policyEnforcer     PolicyEnforcer
+	graphBuilder       GraphBuilder
 	logger             *zap.Logger
 }
 
@@ -69,6 +74,10 @@ func (s *MemoryService) SetContradictionStore(cs domain.ContradictionStore) {
 
 func (s *MemoryService) SetPolicyEnforcer(pe PolicyEnforcer) {
 	s.policyEnforcer = pe
+}
+
+func (s *MemoryService) SetGraphBuilder(gb GraphBuilder) {
+	s.graphBuilder = gb
 }
 
 // CreateResult contains additional info about a memory creation.
@@ -199,6 +208,13 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 		}
 	}
 
+	// Build graph edges for hybrid retrieval (non-blocking)
+	if s.graphBuilder != nil {
+		if err := s.graphBuilder.OnMemoryCreated(ctx, m); err != nil {
+			s.logger.Warn("graph building failed after memory creation", zap.Error(err))
+		}
+	}
+
 	return result, nil
 }
 
@@ -246,6 +262,11 @@ func (s *MemoryService) Recall(ctx context.Context, query string, agentID uuid.U
 		opts.Scoring = domain.ScoringWeighted
 	}
 
+	// Default to hot and warm tiers
+	if len(opts.IncludeTiers) == 0 {
+		opts.IncludeTiers = domain.DefaultIncludeTiers()
+	}
+
 	// For weighted scoring, fetch more candidates so re-ranking is meaningful
 	storeOpts := opts
 	if opts.Scoring == domain.ScoringWeighted {
@@ -265,6 +286,9 @@ func (s *MemoryService) Recall(ctx context.Context, query string, agentID uuid.U
 		return nil, err
 	}
 
+	// Apply tier-based filtering
+	memories = s.filterByTier(memories, opts.IncludeTiers)
+
 	// Apply composite scoring and re-ranking
 	if opts.Scoring == domain.ScoringWeighted && len(memories) > 0 {
 		scorer := s.buildScorer(ctx, agentID)
@@ -281,15 +305,44 @@ func (s *MemoryService) Recall(ctx context.Context, query string, agentID uuid.U
 	}
 
 	// Usage reinforcement: recalled memories get a small confidence boost
+	// Cold/archive tier memories are logged for potential summarization
 	for _, mem := range memories {
-		go func(id uuid.UUID) {
+		tier := domain.ComputeTier(float64(mem.Confidence))
+		behavior := domain.GetTierBehavior(tier)
+
+		go func(id uuid.UUID, shouldSummarize bool) {
 			if err := s.memoryStore.IncrementAccessAndBoost(context.Background(), id, UsageReinforcementBoost); err != nil {
 				s.logger.Debug("failed to reinforce memory on usage", zap.String("memory_id", id.String()), zap.Error(err))
 			}
-		}(mem.ID)
+			if shouldSummarize {
+				s.logger.Debug("cold tier memory accessed, candidate for summarization",
+					zap.String("memory_id", id.String()),
+					zap.String("tier", string(tier)))
+			}
+		}(mem.ID, behavior.SummarizeOnAccess)
 	}
 
 	return memories, nil
+}
+
+func (s *MemoryService) filterByTier(memories []domain.MemoryWithScore, includeTiers []domain.MemoryTier) []domain.MemoryWithScore {
+	tierSet := make(map[domain.MemoryTier]bool)
+	for _, t := range includeTiers {
+		tierSet[t] = true
+	}
+
+	var filtered []domain.MemoryWithScore
+	for _, m := range memories {
+		tier := domain.ComputeTier(float64(m.Confidence))
+		if !tierSet[tier] {
+			continue
+		}
+		behavior := domain.GetTierBehavior(tier)
+		if float64(m.Score) >= behavior.RetrievalThreshold {
+			filtered = append(filtered, m)
+		}
+	}
+	return filtered
 }
 
 // RecallWithExplain returns scored memories with detailed score breakdowns.
@@ -311,6 +364,9 @@ func (s *MemoryService) RecallWithExplain(ctx context.Context, query string, age
 	if opts.Scoring == "" {
 		opts.Scoring = domain.ScoringWeighted
 	}
+	if len(opts.IncludeTiers) == 0 {
+		opts.IncludeTiers = domain.DefaultIncludeTiers()
+	}
 
 	// Fetch extra candidates for re-ranking
 	storeOpts := opts
@@ -328,6 +384,9 @@ func (s *MemoryService) RecallWithExplain(ctx context.Context, query string, age
 	if err != nil {
 		return nil, err
 	}
+
+	// Apply tier-based filtering
+	memories = s.filterByTier(memories, opts.IncludeTiers)
 
 	scorer := s.buildScorer(ctx, agentID)
 	scored := scorer.ScoreAndRank(memories, timeNow())
@@ -528,4 +587,40 @@ func (s *MemoryService) handleTension(ctx context.Context, tension *domain.Tensi
 	}
 
 	return false, nil
+}
+
+func (s *MemoryService) GetHotMemories(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, limit int) ([]domain.Memory, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	return s.memoryStore.GetByTier(ctx, agentID, tenantID, domain.TierHot, limit)
+}
+
+type TierStats struct {
+	HotCount      int                             `json:"hot_count"`
+	WarmCount     int                             `json:"warm_count"`
+	ColdCount     int                             `json:"cold_count"`
+	ArchiveCount  int                             `json:"archive_count"`
+	Distribution  map[domain.MemoryType]TierDist  `json:"tier_distribution,omitempty"`
+}
+
+type TierDist struct {
+	Hot     int `json:"hot"`
+	Warm    int `json:"warm"`
+	Cold    int `json:"cold"`
+	Archive int `json:"archive"`
+}
+
+func (s *MemoryService) GetTierStats(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID) (*TierStats, error) {
+	counts, err := s.memoryStore.GetTierCounts(ctx, agentID, tenantID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &TierStats{
+		HotCount:     counts[domain.TierHot],
+		WarmCount:    counts[domain.TierWarm],
+		ColdCount:    counts[domain.TierCold],
+		ArchiveCount: counts[domain.TierArchive],
+	}, nil
 }

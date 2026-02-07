@@ -23,14 +23,14 @@ import (
 
 // App holds the router and background services for lifecycle management.
 type App struct {
-	Router        *chi.Mux
-	Tuner         *service.TunerService
-	Expirer       *service.ExpirerService
-	Decay         *service.DecayService
-	Consolidation *service.ConsolidationService
-	startTime     time.Time
-	requestCount  atomic.Int64
-	errorCount    atomic.Int64
+	Router         *chi.Mux
+	Tuner          *service.TunerService
+	Expirer        *service.ExpirerService
+	Decay *service.DecayService
+	Consolidation  *service.ConsolidationService
+	startTime      time.Time
+	requestCount   atomic.Int64
+	errorCount     atomic.Int64
 }
 
 func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
@@ -46,6 +46,8 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	schemaStore := store.NewSchemaStore(db)
 	wmStore := store.NewWorkingMemoryStore(db)
 	assocStore := store.NewMemoryAssociationStore(db)
+	graphStore := store.NewGraphStore(db)
+	entityStore := store.NewEntityStore(db)
 
 	// External clients via provider factory
 	var embeddingClient domain.EmbeddingClient
@@ -78,18 +80,25 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	feedbackSvc := service.NewFeedbackService(feedbackStore, memoryStore, agentStore)
 	tunerSvc := service.NewTunerService(feedbackStore, policyStore, logger)
 	expirerSvc := service.NewExpirerService(memoryStore, policyStore, feedbackStore, logger)
-	decaySvc := service.NewDecayService(memoryStore, episodeStore, logger)
 	confidenceSvc := service.NewConfidenceService(memoryStore, logger)
 	episodeSvc := service.NewEpisodeService(episodeStore, agentStore, embeddingClient, llmClient, logger)
 	proceduralSvc := service.NewProceduralService(procedureStore, episodeStore, agentStore, embeddingClient, llmClient, logger)
 	schemaSvc := service.NewSchemaService(schemaStore, memoryStore, agentStore, embeddingClient, llmClient, logger)
 	wmSvc := service.NewWorkingMemoryService(wmStore, assocStore, memoryStore, episodeStore, procedureStore, schemaStore, embeddingClient, logger)
 	consolidationSvc := service.NewConsolidationService(memoryStore, episodeStore, procedureStore, schemaStore, assocStore, contradictionStore, embeddingClient, llmClient, logger)
+	decaySvc := service.NewDecayService(memoryStore, episodeStore, logger)
+	consolidationSvc.SetDecayService(decaySvc)
+	consolidationSvc.SetGraphStore(graphStore)
 	metacognitiveSvc := service.NewMetacognitiveService(memoryStore, episodeStore, procedureStore, schemaStore, contradictionStore, embeddingClient, logger)
+
+	// Graph services
+	hybridRecallSvc := service.NewHybridRecallService(memoryStore, graphStore, entityStore, embeddingClient, llmClient)
+	graphBuilderSvc := service.NewGraphBuilderService(memoryStore, graphStore, entityStore, embeddingClient, llmClient)
 
 	// Wire policy enforcer and contradiction store into memory service
 	memorySvc.SetPolicyEnforcer(policySvc)
 	memorySvc.SetContradictionStore(contradictionStore)
+	memorySvc.SetGraphBuilder(graphBuilderSvc)
 
 	// Wire memory store into episode service for belief extraction
 	episodeSvc.SetMemoryStore(memoryStore)
@@ -97,7 +106,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	// Handlers
 	tenantHandler := handlers.NewTenantHandler(tenantStore)
 	agentHandler := handlers.NewAgentHandler(agentSvc)
-	memoryHandler := handlers.NewMemoryHandler(memorySvc)
+	memoryHandler := handlers.NewMemoryHandler(memorySvc, hybridRecallSvc)
 	policyHandler := handlers.NewPolicyHandler(policySvc)
 	feedbackHandler := handlers.NewFeedbackHandler(feedbackSvc)
 	episodeHandler := handlers.NewEpisodeHandler(episodeSvc)
@@ -108,17 +117,19 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	cognitiveHandler.SetConfidenceService(confidenceSvc)
 	metacognitiveHandler := handlers.NewMetacognitiveHandler(metacognitiveSvc)
 	mindHandler := handlers.NewMindHandler(memoryStore, episodeStore, procedureStore, schemaStore)
+	tierHandler := handlers.NewTierHandler(memorySvc)
+	graphHandler := handlers.NewGraphHandler(hybridRecallSvc, graphBuilderSvc, graphStore, entityStore)
 
 	r := chi.NewRouter()
 
 	// Initialize app with metrics tracking
 	app := &App{
-		Router:        r,
-		Tuner:         tunerSvc,
-		Expirer:       expirerSvc,
-		Decay:         decaySvc,
-		Consolidation: consolidationSvc,
-		startTime:     time.Now(),
+		Router:         r,
+		Tuner:          tunerSvc,
+		Expirer:        expirerSvc,
+		Decay: decaySvc,
+		Consolidation:  consolidationSvc,
+		startTime:      time.Now(),
 	}
 
 	// Metrics collector for middleware
@@ -153,6 +164,8 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 				r.Get("/mind", mindHandler.GetMind)
 				r.Get("/policies", policyHandler.Get)
 				r.Put("/policies", policyHandler.Upsert)
+				r.Get("/tier-stats", tierHandler.GetTierStats)
+				r.Get("/hot-memories", tierHandler.GetHotMemories)
 			})
 		})
 
@@ -200,6 +213,13 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 				r.Post("/contradict", schemaHandler.Contradict)
 				r.Post("/validate", schemaHandler.Validate)
 			})
+		})
+
+		// Graph (entity and relationship queries)
+		r.Route("/graph", func(r chi.Router) {
+			r.Get("/entities", graphHandler.ListEntities)
+			r.Get("/relationships", graphHandler.GetRelationships)
+			r.Post("/traverse", graphHandler.Traverse)
 		})
 
 		// Cognitive operations (working memory, decay, consolidation, metacognition, etc.)
