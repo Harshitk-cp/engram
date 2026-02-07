@@ -4,7 +4,12 @@ import (
 	"fmt"
 
 	"github.com/Harshitk-cp/engram/internal/domain"
+	"github.com/google/uuid"
 )
+
+func parseUUID(s string) (uuid.UUID, error) {
+	return uuid.Parse(s)
+}
 
 func provenanceTag(p domain.Provenance) string {
 	switch p {

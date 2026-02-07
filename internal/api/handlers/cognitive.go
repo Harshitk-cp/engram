@@ -59,8 +59,8 @@ func (h *CognitiveHandler) TriggerDecay(w http.ResponseWriter, r *http.Request) 
 	}
 
 	resp := triggerDecayResponse{
-		MemoriesDecayed:  result.MemoriesDecayed,
-		MemoriesArchived: result.MemoriesArchived,
+		MemoriesDecayed:  result.Decayed,
+		MemoriesArchived: result.Archived,
 		EpisodesDecayed:  result.EpisodesDecayed,
 		EpisodesArchived: result.EpisodesArchived,
 	}

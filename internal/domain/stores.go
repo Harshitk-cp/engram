@@ -31,6 +31,7 @@ type RecallOpts struct {
 	MinConfidence float32
 	Scoring       ScoringMode
 	Explain       bool
+	IncludeTiers  []MemoryTier
 }
 
 type MemoryWithScore struct {
@@ -56,6 +57,12 @@ type MemoryStore interface {
 	GetByAgentForDecay(ctx context.Context, agentID uuid.UUID) ([]Memory, error)
 	Archive(ctx context.Context, id uuid.UUID) error
 	IncrementAccessAndBoost(ctx context.Context, id uuid.UUID, boost float32) error
+	// Tier methods
+	GetByTier(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, tier MemoryTier, limit int) ([]Memory, error)
+	GetTierCounts(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID) (map[MemoryTier]int, error)
+	// Review flag
+	SetNeedsReview(ctx context.Context, id uuid.UUID, needsReview bool) error
+	GetNeedsReview(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, limit int) ([]Memory, error)
 }
 
 type BeliefContradiction struct {
@@ -130,6 +137,9 @@ type LLMClient interface {
 	ExtractEpisodeStructure(ctx context.Context, content string) (*EpisodeExtraction, error)
 	ExtractProcedure(ctx context.Context, content string) (*ProcedureExtraction, error)
 	DetectSchemaPattern(ctx context.Context, memories []Memory) (*SchemaExtraction, error)
+	DetectImplicitFeedback(ctx context.Context, memories []Memory, conversation []Message) ([]ImplicitFeedback, error)
+	ExtractEntities(ctx context.Context, content string) ([]ExtractedEntity, error)
+	DetectRelationships(ctx context.Context, memory *Memory, similarMemories []MemoryWithScore) ([]DetectedRelationship, error)
 }
 
 type PolicyStore interface {
@@ -272,4 +282,25 @@ type MemoryAssociationStore interface {
 	GetByTarget(ctx context.Context, targetType ActivatedMemoryType, targetID uuid.UUID) ([]MemoryAssociation, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 	UpdateStrength(ctx context.Context, id uuid.UUID, strength float32) error
+}
+
+// MutationLogStore handles logging of all memory mutations for explainability.
+type MutationLogStore interface {
+	Create(ctx context.Context, m *MutationLog) error
+	GetByMemoryID(ctx context.Context, memoryID uuid.UUID, limit int) ([]MutationLog, error)
+	GetByAgentID(ctx context.Context, agentID uuid.UUID, since time.Time, limit int) ([]MutationLog, error)
+}
+
+// EpisodeMemoryUsageStore tracks which memories were used per episode.
+type EpisodeMemoryUsageStore interface {
+	Create(ctx context.Context, u *EpisodeMemoryUsage) error
+	GetByEpisodeID(ctx context.Context, episodeID uuid.UUID) ([]EpisodeMemoryUsage, error)
+	GetByMemoryID(ctx context.Context, memoryID uuid.UUID) ([]EpisodeMemoryUsage, error)
+}
+
+// LearningStatsStore handles aggregated learning statistics.
+type LearningStatsStore interface {
+	Upsert(ctx context.Context, s *LearningStats) error
+	GetByAgentID(ctx context.Context, agentID uuid.UUID, limit int) ([]LearningStats, error)
+	GetLatest(ctx context.Context, agentID uuid.UUID) (*LearningStats, error)
 }

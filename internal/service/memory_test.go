@@ -164,6 +164,47 @@ func (m *mockMemoryStore) IncrementAccessAndBoost(ctx context.Context, id uuid.U
 	return nil
 }
 
+func (m *mockMemoryStore) GetByTier(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, tier domain.MemoryTier, limit int) ([]domain.Memory, error) {
+	thresholds := domain.TierConfidenceThresholds[tier]
+	var results []domain.Memory
+	for _, mem := range m.memories {
+		if mem.AgentID != agentID || mem.TenantID != tenantID {
+			continue
+		}
+		if float64(mem.Confidence) > thresholds.Min && float64(mem.Confidence) <= thresholds.Max {
+			results = append(results, *mem)
+			if len(results) >= limit {
+				break
+			}
+		}
+	}
+	return results, nil
+}
+
+func (m *mockMemoryStore) GetTierCounts(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID) (map[domain.MemoryTier]int, error) {
+	counts := make(map[domain.MemoryTier]int)
+	for _, mem := range m.memories {
+		if mem.AgentID != agentID || mem.TenantID != tenantID {
+			continue
+		}
+		tier := domain.ComputeTier(float64(mem.Confidence))
+		counts[tier]++
+	}
+	return counts, nil
+}
+
+func (m *mockMemoryStore) SetNeedsReview(ctx context.Context, id uuid.UUID, needsReview bool) error {
+	_, ok := m.memories[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (m *mockMemoryStore) GetNeedsReview(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, limit int) ([]domain.Memory, error) {
+	return []domain.Memory{}, nil
+}
+
 // mockEmbeddingClient implements domain.EmbeddingClient for testing.
 type mockEmbeddingClient struct{}
 
@@ -245,6 +286,18 @@ func (m *mockLLMClient) DetectSchemaPattern(ctx context.Context, memories []doma
 		ApplicableContexts: []string{"testing"},
 		Confidence:         0.8,
 	}, nil
+}
+
+func (m *mockLLMClient) DetectImplicitFeedback(ctx context.Context, memories []domain.Memory, conversation []domain.Message) ([]domain.ImplicitFeedback, error) {
+	return nil, nil
+}
+
+func (m *mockLLMClient) ExtractEntities(ctx context.Context, content string) ([]domain.ExtractedEntity, error) {
+	return []domain.ExtractedEntity{}, nil
+}
+
+func (m *mockLLMClient) DetectRelationships(ctx context.Context, memory *domain.Memory, similarMemories []domain.MemoryWithScore) ([]domain.DetectedRelationship, error) {
+	return []domain.DetectedRelationship{}, nil
 }
 
 func testLogger() *zap.Logger {

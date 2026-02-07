@@ -73,9 +73,11 @@ type ConsolidationService struct {
 	schemaStore        domain.SchemaStore
 	assocStore         domain.MemoryAssociationStore
 	contradictionStore domain.ContradictionStore
+	graphStore         domain.GraphStore
 	embeddingClient    domain.EmbeddingClient
 	llmClient          domain.LLMClient
 	logger             *zap.Logger
+	decayService       *DecayService
 
 	// Background worker fields
 	interval time.Duration
@@ -113,6 +115,15 @@ func NewConsolidationService(
 // SetInterval sets the consolidation interval.
 func (s *ConsolidationService) SetInterval(d time.Duration) {
 	s.interval = d
+}
+
+func (s *ConsolidationService) SetDecayService(cd *DecayService) {
+	s.decayService = cd
+}
+
+// SetGraphStore sets the graph store for edge decay and pruning.
+func (s *ConsolidationService) SetGraphStore(gs domain.GraphStore) {
+	s.graphStore = gs
 }
 
 // Start begins the background consolidation worker.
@@ -757,46 +768,24 @@ func (s *ConsolidationService) applyForgetting(ctx context.Context, agentID uuid
 	now := time.Now()
 
 	// Apply decay to semantic memories
-	if s.memoryStore != nil {
-		memories, err := s.memoryStore.GetByAgentForDecay(ctx, agentID)
-		if err == nil {
-			for _, mem := range memories {
-				if mem.LastAccessedAt == nil {
-					continue
-				}
+	if s.memoryStore != nil && s.decayService != nil {
+		cogResult, err := s.decayService.BatchDecay(ctx, agentID)
+		if err != nil {
+			s.logger.Warn("decay failed", zap.Error(err))
+		} else {
+			result.decayed = cogResult.Decayed
+			result.archived = cogResult.Archived
 
-				hoursSinceAccess := now.Sub(*mem.LastAccessedAt).Hours()
-				days := hoursSinceAccess / 24
-
-				decayRate := float64(mem.DecayRate)
-				if decayRate == 0 {
-					decayRate = SemanticDecayRate
-				}
-				decayFactor := math.Exp(-decayRate * days)
-
-				// Reinforcement slows decay
-				if mem.ReinforcementCount > 1 {
-					decayFactor = math.Pow(decayFactor, 1.0/math.Log(float64(mem.ReinforcementCount+1)))
-				}
-
-				newConfidence := mem.Confidence * float32(decayFactor)
-				if newConfidence < DecayMinConfidence {
-					newConfidence = DecayMinConfidence
-				}
-
-				if newConfidence < ArchiveThreshold {
-					if err := s.memoryStore.Archive(ctx, mem.ID); err == nil {
-						result.archived++
-					}
-				} else if math.Abs(float64(newConfidence-mem.Confidence)) > 0.001 {
-					if err := s.memoryStore.UpdateConfidence(ctx, mem.ID, newConfidence); err == nil {
-						result.decayed++
-					}
-				}
+			if len(cogResult.TierTransitions) > 0 {
+				s.logger.Debug("tier transitions during decay",
+					zap.Int("count", len(cogResult.TierTransitions)))
 			}
+		}
 
-			// Merge redundant memories if full prune
-			if fullPrune {
+		// Merge redundant memories if full prune
+		if fullPrune {
+			memories, err := s.memoryStore.GetByAgentForDecay(ctx, agentID)
+			if err == nil {
 				merged := s.mergeRedundantMemories(ctx, agentID, tenantID, memories)
 				result.merged = merged
 			}
@@ -822,8 +811,8 @@ func (s *ConsolidationService) applyForgetting(ctx context.Context, agentID uuid
 					decayFactor := math.Exp(-ProceduralDecayRate * daysSinceUse)
 					newConfidence := proc.Confidence * float32(decayFactor)
 
-					if newConfidence < DecayMinConfidence {
-						newConfidence = DecayMinConfidence
+					if newConfidence < ConfidenceFloor {
+						newConfidence = ConfidenceFloor
 					}
 
 					if math.Abs(float64(newConfidence-proc.Confidence)) > 0.001 {
@@ -836,7 +825,30 @@ func (s *ConsolidationService) applyForgetting(ctx context.Context, agentID uuid
 		}
 	}
 
-	// Episodes are handled by the DecayService
+	// Episodes are handled by DecayService
+	if s.graphStore != nil {
+		const edgeDecayRate = 0.0005 // λ = 0.0005 per hour (slower than memories)
+
+		// Decay edge strength
+		decayResult, err := s.graphStore.ApplyEdgeDecay(ctx, agentID, edgeDecayRate)
+		if err != nil {
+			s.logger.Warn("edge decay failed", zap.Error(err))
+		} else if decayResult.Decayed > 0 {
+			s.logger.Debug("edge decay applied",
+				zap.Int("decayed", decayResult.Decayed))
+		}
+
+		// Prune weak/stale edges during full consolidation
+		if fullPrune {
+			pruneResult, err := s.graphStore.PruneGraph(ctx, agentID, domain.DefaultPruningRules())
+			if err != nil {
+				s.logger.Warn("graph pruning failed", zap.Error(err))
+			} else if pruneResult.Pruned > 0 {
+				s.logger.Debug("graph pruning complete",
+					zap.Int("pruned", pruneResult.Pruned))
+			}
+		}
+	}
 
 	return result
 }

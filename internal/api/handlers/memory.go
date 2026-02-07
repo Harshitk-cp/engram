@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/Harshitk-cp/engram/internal/api/middleware"
 	"github.com/Harshitk-cp/engram/internal/domain"
@@ -14,11 +15,12 @@ import (
 )
 
 type MemoryHandler struct {
-	svc *service.MemoryService
+	svc       *service.MemoryService
+	hybridSvc *service.HybridRecallService
 }
 
-func NewMemoryHandler(svc *service.MemoryService) *MemoryHandler {
-	return &MemoryHandler{svc: svc}
+func NewMemoryHandler(svc *service.MemoryService, hybridSvc *service.HybridRecallService) *MemoryHandler {
+	return &MemoryHandler{svc: svc, hybridSvc: hybridSvc}
 }
 
 type createMemoryRequest struct {
@@ -32,7 +34,15 @@ type createMemoryRequest struct {
 
 type createMemoryResponse struct {
 	*domain.Memory
-	Reinforced bool `json:"reinforced"`
+	Reinforced bool              `json:"reinforced"`
+	Tier       domain.MemoryTier `json:"tier"`
+	TierReason string            `json:"tier_reason"`
+}
+
+type getMemoryResponse struct {
+	*domain.Memory
+	Tier       domain.MemoryTier `json:"tier"`
+	TierReason string            `json:"tier_reason"`
 }
 
 func (h *MemoryHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -79,9 +89,12 @@ func (h *MemoryHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	tier := domain.ComputeTier(float64(memory.Confidence))
 	resp := createMemoryResponse{
 		Memory:     memory,
 		Reinforced: result != nil && result.Reinforced,
+		Tier:       tier,
+		TierReason: domain.TierReason(float64(memory.Confidence)),
 	}
 
 	writeJSON(w, http.StatusCreated, resp)
@@ -110,7 +123,12 @@ func (h *MemoryHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, memory)
+	tier := domain.ComputeTier(float64(memory.Confidence))
+	writeJSON(w, http.StatusOK, getMemoryResponse{
+		Memory:     memory,
+		Tier:       tier,
+		TierReason: domain.TierReason(float64(memory.Confidence)),
+	})
 }
 
 func (h *MemoryHandler) Delete(w http.ResponseWriter, r *http.Request) {
@@ -141,7 +159,13 @@ func (h *MemoryHandler) Delete(w http.ResponseWriter, r *http.Request) {
 type memoryWithDecayStatus struct {
 	domain.MemoryWithScore
 	DecayStatus    string                  `json:"decay_status"`
+	Tier           domain.MemoryTier       `json:"tier"`
+	TierReason     string                  `json:"tier_reason"`
 	ScoreBreakdown *service.ScoreBreakdown `json:"score_breakdown,omitempty"`
+	VectorScore    float32                 `json:"vector_score,omitempty"`
+	GraphScore     float32                 `json:"graph_score,omitempty"`
+	GraphPath      []uuid.UUID             `json:"graph_path,omitempty"`
+	PathLength     int                     `json:"path_length,omitempty"`
 }
 
 type recallResponse struct {
@@ -181,13 +205,21 @@ func (h *MemoryHandler) Recall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	opts := domain.RecallOpts{
-		TopK: 10,
+	// Build hybrid recall request
+	req := domain.HybridRecallRequest{
+		Query:        query,
+		AgentID:      agentID,
+		TenantID:     tenant.ID,
+		TopK:         10,
+		VectorWeight: 0.6,
+		GraphWeight:  0.4,
+		MaxGraphHops: 2,
+		UseGraph:     true,
 	}
 
 	if topKStr := r.URL.Query().Get("top_k"); topKStr != "" {
 		if topK, err := strconv.Atoi(topKStr); err == nil && topK > 0 {
-			opts.TopK = topK
+			req.TopK = topK
 		}
 	}
 
@@ -197,52 +229,50 @@ func (h *MemoryHandler) Recall(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid type parameter")
 			return
 		}
-		opts.MemoryType = &mt
+		req.MemoryType = &mt
 	}
 
 	if minConfStr := r.URL.Query().Get("min_confidence"); minConfStr != "" {
 		if mc, err := strconv.ParseFloat(minConfStr, 32); err == nil {
-			opts.MinConfidence = float32(mc)
+			req.MinConfidence = float32(mc)
 		}
 	}
 
-	if scoring := r.URL.Query().Get("scoring"); scoring != "" {
-		opts.Scoring = domain.ScoringMode(scoring)
-	}
-
-	opts.Explain = r.URL.Query().Get("explain") == "true"
-
-	var memoriesWithStatus []memoryWithDecayStatus
-
-	if opts.Explain {
-		scored, err := h.svc.RecallWithExplain(r.Context(), query, agentID, tenant.ID, opts)
-		if err != nil {
-			handleRecallError(w, err)
-			return
-		}
-		for _, sm := range scored {
-			memoriesWithStatus = append(memoriesWithStatus, memoryWithDecayStatus{
-				MemoryWithScore: sm.MemoryWithScore,
-				DecayStatus:     calculateDecayStatus(sm.Confidence),
-				ScoreBreakdown:  sm.Breakdown,
-			})
-		}
-	} else {
-		memories, err := h.svc.Recall(r.Context(), query, agentID, tenant.ID, opts)
-		if err != nil {
-			handleRecallError(w, err)
-			return
-		}
-		for _, mem := range memories {
-			memoriesWithStatus = append(memoriesWithStatus, memoryWithDecayStatus{
-				MemoryWithScore: mem,
-				DecayStatus:     calculateDecayStatus(mem.Confidence),
-			})
+	if gwStr := r.URL.Query().Get("graph_weight"); gwStr != "" {
+		if gw, err := strconv.ParseFloat(gwStr, 64); err == nil && gw >= 0 && gw <= 1 {
+			req.GraphWeight = gw
+			req.VectorWeight = 1 - gw
 		}
 	}
 
-	if memoriesWithStatus == nil {
-		memoriesWithStatus = []memoryWithDecayStatus{}
+	if mhStr := r.URL.Query().Get("max_hops"); mhStr != "" {
+		if mh, err := strconv.Atoi(mhStr); err == nil && mh > 0 && mh <= 5 {
+			req.MaxGraphHops = mh
+		}
+	}
+
+	results, err := h.hybridSvc.Recall(r.Context(), req)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to recall memories")
+		return
+	}
+
+	memoriesWithStatus := make([]memoryWithDecayStatus, 0, len(results))
+	for _, sm := range results {
+		tier := domain.ComputeTier(float64(sm.Confidence))
+		memoriesWithStatus = append(memoriesWithStatus, memoryWithDecayStatus{
+			MemoryWithScore: domain.MemoryWithScore{
+				Memory: sm.Memory,
+				Score:  sm.FinalScore,
+			},
+			DecayStatus: calculateDecayStatus(sm.Confidence),
+			Tier:        tier,
+			TierReason:  domain.TierReason(float64(sm.Confidence)),
+			VectorScore: sm.VectorScore,
+			GraphScore:  sm.GraphScore,
+			GraphPath:   sm.GraphPath,
+			PathLength:  sm.PathLength,
+		})
 	}
 
 	writeJSON(w, http.StatusOK, recallResponse{
@@ -312,4 +342,15 @@ func (h *MemoryHandler) Extract(w http.ResponseWriter, r *http.Request) {
 		Extracted: results,
 		Count:     len(results),
 	})
+}
+
+func parseIncludeTiers(s string) []domain.MemoryTier {
+	var tiers []domain.MemoryTier
+	for _, part := range strings.Split(s, ",") {
+		t := strings.TrimSpace(part)
+		if domain.ValidTier(t) {
+			tiers = append(tiers, domain.MemoryTier(t))
+		}
+	}
+	return tiers
 }
