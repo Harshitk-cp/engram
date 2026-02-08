@@ -90,13 +90,7 @@ func (d *ImplicitFeedbackDetector) DetectAndApply(ctx context.Context, req Detec
 		oldConfidence := memory.Confidence
 		oldReinforcement := memory.ReinforcementCount
 
-		newConfidence := memory.Confidence + effect.ConfidenceDelta
-		if newConfidence > MaxConfidence {
-			newConfidence = MaxConfidence
-		}
-		if newConfidence < MinConfidence {
-			newConfidence = MinConfidence
-		}
+		newConfidence := ApplyLogOddsDelta(memory.Confidence, effect.LogOddsDelta)
 
 		newReinforcement := memory.ReinforcementCount + effect.ReinforcementDelta
 		if newReinforcement < 0 {

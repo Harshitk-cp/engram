@@ -11,50 +11,50 @@ import (
 
 func TestFeedbackEffects(t *testing.T) {
 	tests := []struct {
-		name                string
-		feedbackType        domain.FeedbackType
-		expectedConfDelta   float32
-		expectedReinfDelta  int
-		expectedReview      bool
-		expectedSummarize   bool
+		name               string
+		feedbackType       domain.FeedbackType
+		expectedLogOdds    float64
+		expectedReinfDelta int
+		expectedReview     bool
+		expectedSummarize  bool
 	}{
 		{
 			name:               "helpful increases confidence",
 			feedbackType:       domain.FeedbackTypeHelpful,
-			expectedConfDelta:  0.05,
+			expectedLogOdds:    0.3,
 			expectedReinfDelta: 1,
 		},
 		{
 			name:               "unhelpful decreases confidence",
 			feedbackType:       domain.FeedbackTypeUnhelpful,
-			expectedConfDelta:  -0.10,
+			expectedLogOdds:    -0.5,
 			expectedReinfDelta: -1,
 		},
 		{
 			name:               "used slightly increases confidence",
 			feedbackType:       domain.FeedbackTypeUsed,
-			expectedConfDelta:  0.02,
+			expectedLogOdds:    0.1,
 			expectedReinfDelta: 0,
 		},
 		{
 			name:               "ignored slightly decreases confidence",
 			feedbackType:       domain.FeedbackTypeIgnored,
-			expectedConfDelta:  -0.02,
+			expectedLogOdds:    -0.1,
 			expectedReinfDelta: 0,
 		},
 		{
 			name:               "contradicted triggers review",
 			feedbackType:       domain.FeedbackTypeContradicted,
-			expectedConfDelta:  -0.20,
+			expectedLogOdds:    -1.0,
 			expectedReinfDelta: -2,
 			expectedReview:     true,
 		},
 		{
-			name:                "outdated triggers summarize",
-			feedbackType:        domain.FeedbackTypeOutdated,
-			expectedConfDelta:   -0.15,
-			expectedReinfDelta:  -1,
-			expectedSummarize:   true,
+			name:              "outdated triggers summarize",
+			feedbackType:      domain.FeedbackTypeOutdated,
+			expectedLogOdds:   -0.8,
+			expectedReinfDelta: -1,
+			expectedSummarize: true,
 		},
 	}
 
@@ -65,8 +65,8 @@ func TestFeedbackEffects(t *testing.T) {
 				t.Fatalf("no effect defined for feedback type %s", tt.feedbackType)
 			}
 
-			if effect.ConfidenceDelta != tt.expectedConfDelta {
-				t.Errorf("ConfidenceDelta = %f, want %f", effect.ConfidenceDelta, tt.expectedConfDelta)
+			if effect.LogOddsDelta != tt.expectedLogOdds {
+				t.Errorf("LogOddsDelta = %f, want %f", effect.LogOddsDelta, tt.expectedLogOdds)
 			}
 			if effect.ReinforcementDelta != tt.expectedReinfDelta {
 				t.Errorf("ReinforcementDelta = %d, want %d", effect.ReinforcementDelta, tt.expectedReinfDelta)
@@ -78,6 +78,27 @@ func TestFeedbackEffects(t *testing.T) {
 				t.Errorf("TriggerSummarize = %v, want %v", effect.TriggerSummarize, tt.expectedSummarize)
 			}
 		})
+	}
+}
+
+func TestLogOddsProportionality(t *testing.T) {
+	delta := -1.0
+
+	highConf := ApplyLogOddsDelta(0.95, delta)
+	lowConf := ApplyLogOddsDelta(0.30, delta)
+
+	highDrop := 0.95 - highConf
+	lowDrop := 0.30 - lowConf
+
+	if highDrop >= lowDrop {
+		t.Errorf("high confidence should drop less: high=%.3f, low=%.3f", highDrop, lowDrop)
+	}
+
+	highPct := highDrop / 0.95 * 100
+	lowPct := lowDrop / 0.30 * 100
+
+	if highPct >= lowPct {
+		t.Errorf("high confidence should have smaller %% change: high=%.1f%%, low=%.1f%%", highPct, lowPct)
 	}
 }
 
@@ -158,10 +179,10 @@ func TestLearningService_RecordOutcome_Success(t *testing.T) {
 		t.Fatalf("GetByID failed: %v", err)
 	}
 
-	// Success should apply helpful effect (+0.05 confidence)
-	expectedConf := float32(0.75)
-	if updated.Confidence != expectedConf {
-		t.Errorf("Confidence = %f, want %f", updated.Confidence, expectedConf)
+	helpfulEffect := domain.FeedbackEffects[domain.FeedbackTypeHelpful]
+	expectedConf := ApplyLogOddsDelta(0.7, helpfulEffect.LogOddsDelta)
+	if !approxEqual(updated.Confidence, expectedConf, 0.001) {
+		t.Errorf("Confidence = %f, want ~%f", updated.Confidence, expectedConf)
 	}
 
 	if len(mutationStore.logs) != 1 {
@@ -212,13 +233,12 @@ func TestLearningService_RecordOutcome_Failure(t *testing.T) {
 		t.Fatalf("GetByID failed: %v", err)
 	}
 
-	// Failure should apply unhelpful effect (-0.10 confidence)
-	expectedConf := float32(0.6)
+	unhelpfulEffect := domain.FeedbackEffects[domain.FeedbackTypeUnhelpful]
+	expectedConf := ApplyLogOddsDelta(0.7, unhelpfulEffect.LogOddsDelta)
 	if !approxEqual(updated.Confidence, expectedConf, 0.001) {
 		t.Errorf("Confidence = %f, want ~%f", updated.Confidence, expectedConf)
 	}
 
-	// Reinforcement count should decrease by 1
 	expectedReinf := 2
 	if updated.ReinforcementCount != expectedReinf {
 		t.Errorf("ReinforcementCount = %d, want %d", updated.ReinforcementCount, expectedReinf)
@@ -277,23 +297,26 @@ func TestConfidenceBounds(t *testing.T) {
 	memStore := newMockMemoryStore()
 	logger := testLogger()
 
+	helpfulEffect := domain.FeedbackEffects[domain.FeedbackTypeHelpful]
+	unhelpfulEffect := domain.FeedbackEffects[domain.FeedbackTypeUnhelpful]
+
 	tests := []struct {
-		name           string
-		initialConf    float32
-		outcome        domain.OutcomeType
-		expectedConf   float32
+		name         string
+		initialConf  float32
+		outcome      domain.OutcomeType
+		expectedConf float32
 	}{
 		{
-			name:         "confidence capped at max",
+			name:         "high confidence increases proportionally",
 			initialConf:  0.97,
 			outcome:      domain.OutcomeSuccess,
-			expectedConf: MaxConfidence, // 0.99
+			expectedConf: ApplyLogOddsDelta(0.97, helpfulEffect.LogOddsDelta),
 		},
 		{
-			name:         "confidence floored at min",
+			name:         "low confidence decreases proportionally",
 			initialConf:  0.15,
 			outcome:      domain.OutcomeFailure,
-			expectedConf: MinConfidence, // 0.1
+			expectedConf: ApplyLogOddsDelta(0.15, unhelpfulEffect.LogOddsDelta),
 		},
 	}
 
@@ -323,9 +346,24 @@ func TestConfidenceBounds(t *testing.T) {
 			_ = svc.RecordOutcome(context.Background(), record)
 
 			updated, _ := memStore.GetByID(context.Background(), mem.ID, tenantID)
-			if updated.Confidence != tt.expectedConf {
-				t.Errorf("Confidence = %f, want %f", updated.Confidence, tt.expectedConf)
+			if updated.Confidence < tt.expectedConf-0.001 || updated.Confidence > tt.expectedConf+0.001 {
+				t.Errorf("Confidence = %f, want ~%f", updated.Confidence, tt.expectedConf)
 			}
 		})
+	}
+}
+
+func TestConfidenceNeverExceedsBounds(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		conf := ApplyLogOddsDelta(0.99, 10.0)
+		if conf > DefaultMaxConfidence {
+			t.Errorf("confidence %f exceeds max %f", conf, DefaultMaxConfidence)
+		}
+	}
+	for i := 0; i < 100; i++ {
+		conf := ApplyLogOddsDelta(0.01, -10.0)
+		if conf < DefaultMinConfidence {
+			t.Errorf("confidence %f below min %f", conf, DefaultMinConfidence)
+		}
 	}
 }

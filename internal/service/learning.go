@@ -106,7 +106,6 @@ func (s *LearningService) RecordOutcome(ctx context.Context, record domain.Outco
 }
 
 func (s *LearningService) applyOutcomeEffect(ctx context.Context, memID uuid.UUID, effect domain.FeedbackEffect, feedbackType domain.FeedbackType, episodeID uuid.UUID) error {
-	// Get current memory state - we need tenant ID but don't have it, so we search all
 	memory, err := s.getMemoryByIDWithoutTenant(ctx, memID)
 	if err != nil {
 		return err
@@ -115,13 +114,7 @@ func (s *LearningService) applyOutcomeEffect(ctx context.Context, memID uuid.UUI
 	oldConfidence := memory.Confidence
 	oldReinforcement := memory.ReinforcementCount
 
-	newConfidence := memory.Confidence + effect.ConfidenceDelta
-	if newConfidence > MaxConfidence {
-		newConfidence = MaxConfidence
-	}
-	if newConfidence < MinConfidence {
-		newConfidence = MinConfidence
-	}
+	newConfidence := ApplyLogOddsDelta(memory.Confidence, effect.LogOddsDelta)
 
 	newReinforcement := memory.ReinforcementCount + effect.ReinforcementDelta
 	if newReinforcement < 0 {

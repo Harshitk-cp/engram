@@ -86,16 +86,8 @@ func (s *FeedbackService) applyFeedbackEffect(ctx context.Context, f *domain.Fee
 	oldConfidence := memory.Confidence
 	oldReinforcement := memory.ReinforcementCount
 
-	// Calculate new confidence
-	newConfidence := memory.Confidence + effect.ConfidenceDelta
-	if newConfidence > MaxConfidence {
-		newConfidence = MaxConfidence
-	}
-	if newConfidence < MinConfidence {
-		newConfidence = MinConfidence
-	}
+	newConfidence := ApplyLogOddsDelta(memory.Confidence, effect.LogOddsDelta)
 
-	// Calculate new reinforcement count
 	newReinforcement := memory.ReinforcementCount + effect.ReinforcementDelta
 	if newReinforcement < 0 {
 		newReinforcement = 0
