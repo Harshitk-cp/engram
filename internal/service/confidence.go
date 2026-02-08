@@ -11,19 +11,45 @@ import (
 )
 
 const (
-	DefaultReinforcementBoost   = 0.05
-	DefaultContradictionPenalty = 0.10
+	DefaultReinforcementLogOdds = 0.3
+	DefaultContradictionLogOdds = 0.5
 	DefaultMaxConfidence        = 0.99
 	DefaultMinConfidence        = 0.01
 	DefaultDecayLambda          = 0.001
 )
 
+func Logit(p float64) float64 {
+	p = clampConfidence(p)
+	return math.Log(p / (1 - p))
+}
+
+func Sigmoid(x float64) float64 {
+	return 1.0 / (1.0 + math.Exp(-x))
+}
+
+func ApplyLogOddsDelta(confidence float32, logOddsDelta float64) float32 {
+	logOdds := Logit(float64(confidence))
+	newLogOdds := logOdds + logOddsDelta
+	newConf := Sigmoid(newLogOdds)
+	return float32(clampConfidence(newConf))
+}
+
+func clampConfidence(p float64) float64 {
+	if p < DefaultMinConfidence {
+		return DefaultMinConfidence
+	}
+	if p > DefaultMaxConfidence {
+		return DefaultMaxConfidence
+	}
+	return p
+}
+
 type ConfidenceService struct {
 	store  domain.MemoryStore
 	logger *zap.Logger
 
-	ReinforcementBoost   float64
-	ContradictionPenalty float64
+	ReinforcementLogOdds float64
+	ContradictionLogOdds float64
 	MaxConfidence        float64
 	MinConfidence        float64
 	DecayLambda          float64
@@ -33,8 +59,8 @@ func NewConfidenceService(store domain.MemoryStore, logger *zap.Logger) *Confide
 	return &ConfidenceService{
 		store:                store,
 		logger:               logger,
-		ReinforcementBoost:   DefaultReinforcementBoost,
-		ContradictionPenalty: DefaultContradictionPenalty,
+		ReinforcementLogOdds: DefaultReinforcementLogOdds,
+		ContradictionLogOdds: DefaultContradictionLogOdds,
 		MaxConfidence:        DefaultMaxConfidence,
 		MinConfidence:        DefaultMinConfidence,
 		DecayLambda:          DefaultDecayLambda,
@@ -47,16 +73,16 @@ func (s *ConfidenceService) Reinforce(ctx context.Context, memoryID uuid.UUID, t
 		return err
 	}
 
-	newConfidence := math.Min(float64(memory.Confidence)+s.ReinforcementBoost, s.MaxConfidence)
+	newConfidence := ApplyLogOddsDelta(memory.Confidence, s.ReinforcementLogOdds)
 	newCount := memory.ReinforcementCount + 1
 
 	s.logger.Debug("reinforcing memory",
 		zap.String("memory_id", memoryID.String()),
 		zap.Float32("old_confidence", memory.Confidence),
-		zap.Float64("new_confidence", newConfidence),
+		zap.Float32("new_confidence", newConfidence),
 		zap.Int("reinforcement_count", newCount))
 
-	return s.store.UpdateReinforcement(ctx, memoryID, float32(newConfidence), newCount)
+	return s.store.UpdateReinforcement(ctx, memoryID, newConfidence, newCount)
 }
 
 func (s *ConfidenceService) Penalize(ctx context.Context, memoryID uuid.UUID, tenantID uuid.UUID) error {
@@ -65,7 +91,7 @@ func (s *ConfidenceService) Penalize(ctx context.Context, memoryID uuid.UUID, te
 		return err
 	}
 
-	newConfidence := math.Max(float64(memory.Confidence)-s.ContradictionPenalty, s.MinConfidence)
+	newConfidence := ApplyLogOddsDelta(memory.Confidence, -s.ContradictionLogOdds)
 	newCount := memory.ReinforcementCount - 1
 	if newCount < 0 {
 		newCount = 0
@@ -74,10 +100,10 @@ func (s *ConfidenceService) Penalize(ctx context.Context, memoryID uuid.UUID, te
 	s.logger.Debug("penalizing memory",
 		zap.String("memory_id", memoryID.String()),
 		zap.Float32("old_confidence", memory.Confidence),
-		zap.Float64("new_confidence", newConfidence),
+		zap.Float32("new_confidence", newConfidence),
 		zap.Int("reinforcement_count", newCount))
 
-	return s.store.UpdateReinforcement(ctx, memoryID, float32(newConfidence), newCount)
+	return s.store.UpdateReinforcement(ctx, memoryID, newConfidence, newCount)
 }
 
 func (s *ConfidenceService) ApplyDecay(memory *domain.Memory) float64 {

@@ -26,39 +26,37 @@ func ValidFeedbackType(t string) bool {
 	return false
 }
 
-// FeedbackEffect defines how feedback mutates memory confidence and state.
 type FeedbackEffect struct {
-	ConfidenceDelta    float32
+	LogOddsDelta       float64
 	ReinforcementDelta int
 	TriggerReview      bool
 	TriggerSummarize   bool
 }
 
-// FeedbackEffects maps feedback types to their mutation effects.
 var FeedbackEffects = map[FeedbackType]FeedbackEffect{
 	FeedbackTypeHelpful: {
-		ConfidenceDelta:    +0.05,
+		LogOddsDelta:       +0.3,
 		ReinforcementDelta: +1,
 	},
 	FeedbackTypeUnhelpful: {
-		ConfidenceDelta:    -0.10,
+		LogOddsDelta:       -0.5,
 		ReinforcementDelta: -1,
 	},
 	FeedbackTypeUsed: {
-		ConfidenceDelta:    +0.02,
+		LogOddsDelta:       +0.1,
 		ReinforcementDelta: 0,
 	},
 	FeedbackTypeIgnored: {
-		ConfidenceDelta:    -0.02,
+		LogOddsDelta:       -0.1,
 		ReinforcementDelta: 0,
 	},
 	FeedbackTypeContradicted: {
-		ConfidenceDelta:    -0.20,
+		LogOddsDelta:       -1.0,
 		ReinforcementDelta: -2,
 		TriggerReview:      true,
 	},
 	FeedbackTypeOutdated: {
-		ConfidenceDelta:    -0.15,
+		LogOddsDelta:       -0.8,
 		ReinforcementDelta: -1,
 		TriggerSummarize:   true,
 	},

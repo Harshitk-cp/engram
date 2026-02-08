@@ -145,8 +145,8 @@ func TestConfidenceService_Reinforce(t *testing.T) {
 	}
 
 	updated := memStore.reinforced[mem.ID]
-	expectedConf := 0.6 + DefaultReinforcementBoost
-	if float64(updated.conf) < expectedConf-0.001 || float64(updated.conf) > expectedConf+0.001 {
+	expectedConf := ApplyLogOddsDelta(0.6, DefaultReinforcementLogOdds)
+	if updated.conf < expectedConf-0.001 || updated.conf > expectedConf+0.001 {
 		t.Errorf("confidence = %f, want ~%f", updated.conf, expectedConf)
 	}
 	if updated.count != 2 {
@@ -207,9 +207,9 @@ func TestConfidenceService_Penalize(t *testing.T) {
 	}
 
 	updated := memStore.reinforced[mem.ID]
-	expectedConf := float32(0.6 - DefaultContradictionPenalty)
-	if updated.conf != expectedConf {
-		t.Errorf("confidence = %f, want %f", updated.conf, expectedConf)
+	expectedConf := ApplyLogOddsDelta(0.6, -DefaultContradictionLogOdds)
+	if updated.conf < expectedConf-0.001 || updated.conf > expectedConf+0.001 {
+		t.Errorf("confidence = %f, want ~%f", updated.conf, expectedConf)
 	}
 	if updated.count != 2 {
 		t.Errorf("reinforcement count = %d, want 2", updated.count)
