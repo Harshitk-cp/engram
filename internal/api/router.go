@@ -48,6 +48,9 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	assocStore := store.NewMemoryAssociationStore(db)
 	graphStore := store.NewGraphStore(db)
 	entityStore := store.NewEntityStore(db)
+	mutationLogStore := store.NewMutationLogStore(db)
+	episodeMemUsageStore := store.NewEpisodeMemoryUsageStore(db)
+	learningStatsStore := store.NewLearningStatsStore(db)
 
 	// External clients via provider factory
 	var embeddingClient domain.EmbeddingClient
@@ -95,6 +98,14 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	hybridRecallSvc := service.NewHybridRecallService(memoryStore, graphStore, entityStore, embeddingClient, llmClient)
 	graphBuilderSvc := service.NewGraphBuilderService(memoryStore, graphStore, entityStore, embeddingClient, llmClient)
 
+	// Learning services
+	learningSvc := service.NewLearningService(memoryStore, episodeStore, logger)
+	learningSvc.SetMutationLogStore(mutationLogStore)
+	learningSvc.SetEpisodeMemoryUsageStore(episodeMemUsageStore)
+	learningSvc.SetLearningStatsStore(learningStatsStore)
+	implicitFeedbackSvc := service.NewImplicitFeedbackDetector(llmClient, feedbackStore, memoryStore, logger)
+	implicitFeedbackSvc.SetMutationLogStore(mutationLogStore)
+
 	// Wire policy enforcer and contradiction store into memory service
 	memorySvc.SetPolicyEnforcer(policySvc)
 	memorySvc.SetContradictionStore(contradictionStore)
@@ -119,6 +130,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	mindHandler := handlers.NewMindHandler(memoryStore, episodeStore, procedureStore, schemaStore)
 	tierHandler := handlers.NewTierHandler(memorySvc)
 	graphHandler := handlers.NewGraphHandler(hybridRecallSvc, graphBuilderSvc, graphStore, entityStore)
+	learningHandler := handlers.NewLearningHandler(learningSvc, implicitFeedbackSvc, mutationLogStore)
 
 	r := chi.NewRouter()
 
@@ -158,14 +170,17 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 
 		// Agents
 		r.Route("/agents", func(r chi.Router) {
+			r.Get("/", agentHandler.List)
 			r.Post("/", agentHandler.Create)
 			r.Route("/{id}", func(r chi.Router) {
 				r.Get("/", agentHandler.GetByID)
+				r.Delete("/", agentHandler.Delete)
 				r.Get("/mind", mindHandler.GetMind)
 				r.Get("/policies", policyHandler.Get)
 				r.Put("/policies", policyHandler.Upsert)
 				r.Get("/tier-stats", tierHandler.GetTierStats)
 				r.Get("/hot-memories", tierHandler.GetHotMemories)
+				r.Get("/learning/stats", learningHandler.GetStats)
 			})
 		})
 
@@ -176,6 +191,13 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 			r.Post("/", memoryHandler.Create)
 			r.Get("/{id}", memoryHandler.GetByID)
 			r.Delete("/{id}", memoryHandler.Delete)
+			r.Get("/{id}/mutations", learningHandler.GetMutationHistory)
+		})
+
+		// Learning
+		r.Route("/learning", func(r chi.Router) {
+			r.Post("/outcome", learningHandler.RecordOutcome)
+			r.Post("/detect-feedback", learningHandler.DetectImplicitFeedback)
 		})
 
 		// Episodes (episodic memory)
@@ -295,22 +317,25 @@ func (app *App) metricsHandler() http.HandlerFunc {
 
 // Ensure stores and clients satisfy interfaces at compile time.
 var (
-	_ domain.TenantStore        = (*store.TenantStore)(nil)
-	_ domain.AgentStore         = (*store.AgentStore)(nil)
-	_ domain.MemoryStore        = (*store.MemoryStore)(nil)
-	_ domain.PolicyStore        = (*store.PolicyStore)(nil)
-	_ domain.FeedbackStore      = (*store.FeedbackStore)(nil)
-	_ domain.ContradictionStore = (*store.ContradictionStore)(nil)
-	_ domain.EpisodeStore       = (*store.EpisodeStore)(nil)
-	_ domain.ProcedureStore     = (*store.ProcedureStore)(nil)
+	_ domain.TenantStore             = (*store.TenantStore)(nil)
+	_ domain.AgentStore              = (*store.AgentStore)(nil)
+	_ domain.MemoryStore             = (*store.MemoryStore)(nil)
+	_ domain.PolicyStore             = (*store.PolicyStore)(nil)
+	_ domain.FeedbackStore           = (*store.FeedbackStore)(nil)
+	_ domain.ContradictionStore      = (*store.ContradictionStore)(nil)
+	_ domain.EpisodeStore            = (*store.EpisodeStore)(nil)
+	_ domain.ProcedureStore          = (*store.ProcedureStore)(nil)
 	_ domain.SchemaStore             = (*store.SchemaStore)(nil)
 	_ domain.WorkingMemoryStore      = (*store.WorkingMemoryStore)(nil)
 	_ domain.MemoryAssociationStore  = (*store.MemoryAssociationStore)(nil)
+	_ domain.MutationLogStore        = (*store.MutationLogStore)(nil)
+	_ domain.EpisodeMemoryUsageStore = (*store.EpisodeMemoryUsageStore)(nil)
+	_ domain.LearningStatsStore      = (*store.LearningStatsStore)(nil)
 	_ domain.EmbeddingClient         = (*embedding.OpenAIClient)(nil)
-	_ domain.EmbeddingClient    = (*embedding.MockClient)(nil)
-	_ domain.LLMClient          = (*llm.OpenAIClient)(nil)
-	_ domain.LLMClient          = (*llm.AnthropicClient)(nil)
-	_ domain.LLMClient          = (*llm.GeminiClient)(nil)
-	_ domain.LLMClient          = (*llm.CerebrasClient)(nil)
-	_ domain.LLMClient          = (*llm.MockClient)(nil)
+	_ domain.EmbeddingClient         = (*embedding.MockClient)(nil)
+	_ domain.LLMClient               = (*llm.OpenAIClient)(nil)
+	_ domain.LLMClient               = (*llm.AnthropicClient)(nil)
+	_ domain.LLMClient               = (*llm.GeminiClient)(nil)
+	_ domain.LLMClient               = (*llm.CerebrasClient)(nil)
+	_ domain.LLMClient               = (*llm.MockClient)(nil)
 )

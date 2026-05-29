@@ -46,6 +46,25 @@ func (m *mockAgentStore) GetByExternalID(ctx context.Context, externalID string,
 	return nil, store.ErrNotFound
 }
 
+func (m *mockAgentStore) ListByTenantID(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]domain.Agent, error) {
+	var result []domain.Agent
+	for _, a := range m.agents {
+		if a.TenantID == tenantID {
+			result = append(result, *a)
+		}
+	}
+	return result, nil
+}
+
+func (m *mockAgentStore) Delete(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error {
+	a, ok := m.agents[id]
+	if !ok || a.TenantID != tenantID {
+		return store.ErrNotFound
+	}
+	delete(m.agents, id)
+	return nil
+}
+
 func TestAgentService_Create(t *testing.T) {
 	s := NewAgentService(newMockAgentStore())
 	ctx := context.Background()

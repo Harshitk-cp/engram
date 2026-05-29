@@ -8,7 +8,7 @@
 //
 // Usage:
 //   export ENGRAM_API_KEY=<your-api-key>
-//   go run ./examples/01_learning_agent.go
+//   go run ./examples/01_learning_agent/
 
 package main
 

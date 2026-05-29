@@ -16,6 +16,8 @@ type AgentStore interface {
 	Create(ctx context.Context, a *Agent) error
 	GetByID(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) (*Agent, error)
 	GetByExternalID(ctx context.Context, externalID string, tenantID uuid.UUID) (*Agent, error)
+	ListByTenantID(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]Agent, error)
+	Delete(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error
 }
 
 type ScoringMode string

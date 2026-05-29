@@ -2,9 +2,11 @@ package service
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/Harshitk-cp/engram/internal/domain"
+	"github.com/Harshitk-cp/engram/internal/store"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
@@ -185,11 +187,19 @@ func (s *LearningService) getMemoryByIDWithoutTenant(ctx context.Context, memID 
 }
 
 // GetLearningStats returns aggregated learning statistics for an agent.
+// Returns (nil, nil) when no stats exist yet.
 func (s *LearningService) GetLearningStats(ctx context.Context, agentID uuid.UUID) (*domain.LearningStats, error) {
 	if s.learningStatsStore == nil {
 		return nil, nil
 	}
-	return s.learningStatsStore.GetLatest(ctx, agentID)
+	stats, err := s.learningStatsStore.GetLatest(ctx, agentID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return stats, nil
 }
 
 // ComputeLearningStats computes and stores learning statistics for an agent over a time period.

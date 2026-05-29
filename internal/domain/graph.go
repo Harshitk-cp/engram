@@ -218,8 +218,9 @@ type HybridRecallRequest struct {
 	GraphWeight  float64   `json:"graph_weight"`
 	MaxGraphHops int       `json:"max_graph_hops"`
 	UseGraph     bool      `json:"use_graph"`
-	MinConfidence float32  `json:"min_confidence,omitempty"`
-	MemoryType   *MemoryType `json:"memory_type,omitempty"`
+	MinConfidence float32      `json:"min_confidence,omitempty"`
+	MemoryType    *MemoryType  `json:"memory_type,omitempty"`
+	IncludeTiers  []MemoryTier `json:"include_tiers,omitempty"`
 }
 
 type ScoredMemory struct {

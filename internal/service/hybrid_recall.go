@@ -68,6 +68,7 @@ func (s *HybridRecallService) Recall(ctx context.Context, req domain.HybridRecal
 		TopK:          req.TopK * 2, // Get more for merging
 		MemoryType:    req.MemoryType,
 		MinConfidence: req.MinConfidence,
+		IncludeTiers:  req.IncludeTiers,
 	}
 	vectorResults, err := s.memoryStore.Recall(ctx, embedding, req.AgentID, req.TenantID, recallOpts)
 	if err != nil {

@@ -43,3 +43,18 @@ func (s *AgentService) GetByID(ctx context.Context, id uuid.UUID, tenantID uuid.
 	}
 	return a, nil
 }
+
+func (s *AgentService) List(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]domain.Agent, error) {
+	return s.store.ListByTenantID(ctx, tenantID, limit, offset)
+}
+
+func (s *AgentService) Delete(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error {
+	err := s.store.Delete(ctx, id, tenantID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ErrAgentNotFound
+		}
+		return err
+	}
+	return nil
+}

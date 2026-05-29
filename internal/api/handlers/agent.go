@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 
 	"github.com/Harshitk-cp/engram/internal/api/middleware"
 	"github.com/Harshitk-cp/engram/internal/domain"
@@ -65,6 +66,69 @@ func (h *AgentHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, agent)
+}
+
+func (h *AgentHandler) List(w http.ResponseWriter, r *http.Request) {
+	tenant := middleware.TenantFromContext(r.Context())
+	if tenant == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	limit := 50
+	offset := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
+			limit = n
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+
+	agents, err := h.svc.List(r.Context(), tenant.ID, limit, offset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list agents")
+		return
+	}
+	if agents == nil {
+		agents = []domain.Agent{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"agents": agents,
+		"count":  len(agents),
+		"limit":  limit,
+		"offset": offset,
+	})
+}
+
+func (h *AgentHandler) Delete(w http.ResponseWriter, r *http.Request) {
+	tenant := middleware.TenantFromContext(r.Context())
+	if tenant == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	idStr := chi.URLParam(r, "id")
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid agent id")
+		return
+	}
+
+	if err := h.svc.Delete(r.Context(), id, tenant.ID); err != nil {
+		if errors.Is(err, service.ErrAgentNotFound) {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to delete agent")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *AgentHandler) GetByID(w http.ResponseWriter, r *http.Request) {

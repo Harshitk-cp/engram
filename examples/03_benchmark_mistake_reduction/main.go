@@ -10,7 +10,7 @@
 //
 // Usage:
 //   export ENGRAM_API_KEY=<your-api-key>
-//   go run ./examples/03_benchmark_mistake_reduction.go
+//   go run ./examples/03_benchmark_mistake_reduction/
 
 package main
 

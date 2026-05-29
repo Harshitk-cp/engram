@@ -10,7 +10,7 @@
 //
 // Usage:
 //   export ENGRAM_API_KEY=<your-api-key>
-//   go run ./examples/02_memory_evolution_demo.go
+//   go run ./examples/02_memory_evolution_demo/
 
 package main
 

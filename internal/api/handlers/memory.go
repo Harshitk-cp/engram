@@ -251,9 +251,13 @@ func (h *MemoryHandler) Recall(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if tiersStr := r.URL.Query().Get("include_tiers"); tiersStr != "" {
+		req.IncludeTiers = parseIncludeTiers(tiersStr)
+	}
+
 	results, err := h.hybridSvc.Recall(r.Context(), req)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to recall memories")
+		handleRecallError(w, err)
 		return
 	}
 
