@@ -1,21 +1,21 @@
 package handlers
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 
-	"github.com/Harshitk-cp/engram/internal/api/middleware"
 	"github.com/Harshitk-cp/engram/internal/domain"
 )
 
+// TenantHandler exposes the legacy POST /v1/tenants endpoint.
+// Deprecated: use POST /v1/setup instead.
 type TenantHandler struct {
-	store domain.TenantStore
+	tenantStore domain.TenantStore
+	apiKeyStore domain.APIKeyStore
 }
 
-func NewTenantHandler(store domain.TenantStore) *TenantHandler {
-	return &TenantHandler{store: store}
+func NewTenantHandler(ts domain.TenantStore, aks domain.APIKeyStore) *TenantHandler {
+	return &TenantHandler{tenantStore: ts, apiKeyStore: aks}
 }
 
 type createTenantRequest struct {
@@ -28,45 +28,38 @@ type createTenantResponse struct {
 	APIKey string `json:"api_key"`
 }
 
+// Create is the legacy unauthenticated tenant bootstrap endpoint.
+// It still functions but is deprecated — callers receive a Deprecation header.
 func (h *TenantHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var req createTenantRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-
-	if req.Name == "" {
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
 
-	apiKey, err := generateAPIKey()
+	tenant := &domain.Tenant{Name: req.Name}
+	if err := h.tenantStore.Create(r.Context(), tenant); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create tenant")
+		return
+	}
+
+	rawKey, apiKey, err := buildMasterKey(tenant.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to generate API key")
 		return
 	}
 
-	tenant := &domain.Tenant{
-		Name:       req.Name,
-		APIKeyHash: middleware.HashAPIKey(apiKey),
-	}
-
-	if err := h.store.Create(r.Context(), tenant); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to create tenant")
+	if err := h.apiKeyStore.Create(r.Context(), apiKey); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to store API key")
 		return
 	}
 
+	w.Header().Set("Deprecation", "true")
+	w.Header().Set("Link", `</v1/setup>; rel="successor-version"`)
 	writeJSON(w, http.StatusCreated, createTenantResponse{
 		ID:     tenant.ID.String(),
 		Name:   tenant.Name,
-		APIKey: apiKey,
+		APIKey: rawKey,
 	})
 }
 
-func generateAPIKey() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return "mk_" + hex.EncodeToString(b), nil
-}

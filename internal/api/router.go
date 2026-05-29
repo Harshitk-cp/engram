@@ -114,8 +114,12 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	// Wire memory store into episode service for belief extraction
 	episodeSvc.SetMemoryStore(memoryStore)
 
+	// Key store
+	apiKeyStore := store.NewAPIKeyStore(db)
+
 	// Handlers
-	tenantHandler := handlers.NewTenantHandler(tenantStore)
+	tenantHandler := handlers.NewTenantHandler(tenantStore, apiKeyStore)
+	setupHandler := handlers.NewSetupHandler(tenantStore, apiKeyStore, config.SetupToken())
 	agentHandler := handlers.NewAgentHandler(agentSvc)
 	memoryHandler := handlers.NewMemoryHandler(memorySvc, hybridRecallSvc)
 	policyHandler := handlers.NewPolicyHandler(policySvc)
@@ -161,12 +165,23 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	// Metrics (no auth)
 	r.Get("/metrics", app.metricsHandler())
 
-	// Tenant creation (no auth — bootstrap endpoint)
+	// Bootstrap (no auth — protected by X-Setup-Token header)
+	r.Post("/v1/setup", setupHandler.Bootstrap)
+
+	// Legacy tenant creation (no auth — deprecated, kept for backward compatibility)
 	r.Post("/v1/tenants", tenantHandler.Create)
 
 	// Authenticated routes
 	r.Route("/v1", func(r chi.Router) {
-		r.Use(mw.APIKeyAuth(tenantStore))
+		r.Use(mw.APIKeyAuth(apiKeyStore))
+
+		// Key management (admin scope required)
+		r.Route("/keys", func(r chi.Router) {
+			r.Use(mw.RequireScope("admin"))
+			r.Post("/", setupHandler.CreateKey)
+			r.Get("/", setupHandler.ListKeys)
+			r.Delete("/{id}", setupHandler.RevokeKey)
+		})
 
 		// Agents
 		r.Route("/agents", func(r chi.Router) {

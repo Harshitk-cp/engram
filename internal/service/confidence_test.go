@@ -101,6 +101,18 @@ func (m *mockMemoryStoreForConfidence) Archive(ctx context.Context, id uuid.UUID
 	return nil
 }
 
+func (m *mockMemoryStoreForConfidence) Restore(ctx context.Context, id uuid.UUID) error {
+	return nil
+}
+
+func (m *mockMemoryStoreForConfidence) GetByIDOnly(ctx context.Context, id uuid.UUID) (*domain.Memory, error) {
+	mem, ok := m.memories[id]
+	if !ok {
+		return nil, store.ErrNotFound
+	}
+	return mem, nil
+}
+
 func (m *mockMemoryStoreForConfidence) IncrementAccessAndBoost(ctx context.Context, id uuid.UUID, boost float32) error {
 	return nil
 }

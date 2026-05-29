@@ -13,14 +13,27 @@ import (
 
 type contextKey string
 
-const tenantContextKey contextKey = "tenant"
+const (
+	tenantContextKey  contextKey = "tenant"
+	authContextKey    contextKey = "auth"
+)
 
 func TenantFromContext(ctx context.Context) *domain.Tenant {
-	t, _ := ctx.Value(tenantContextKey).(*domain.Tenant)
-	return t
+	if a, ok := ctx.Value(authContextKey).(*domain.APIKeyAuth); ok && a != nil {
+		return a.Tenant
+	}
+	return nil
 }
 
-func APIKeyAuth(tenantStore domain.TenantStore) func(http.Handler) http.Handler {
+func AuthFromContext(ctx context.Context) *domain.APIKeyAuth {
+	a, _ := ctx.Value(authContextKey).(*domain.APIKeyAuth)
+	return a
+}
+
+// APIKeyAuth authenticates requests using the api_keys table.
+// On success it stores *domain.APIKeyAuth in the request context and
+// fires a non-blocking last_used_at update.
+func APIKeyAuth(apiKeyStore domain.APIKeyStore) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
@@ -35,29 +48,44 @@ func APIKeyAuth(tenantStore domain.TenantStore) func(http.Handler) http.Handler 
 				return
 			}
 
-			apiKey := parts[1]
-			hash := hashAPIKey(apiKey)
+			hash := HashAPIKey(parts[1])
 
-			tenant, err := tenantStore.GetByAPIKeyHash(r.Context(), hash)
+			auth, err := apiKeyStore.GetAuthByHash(r.Context(), hash)
 			if err != nil {
 				writeError(w, http.StatusUnauthorized, "invalid API key")
 				return
 			}
 
-			ctx := context.WithValue(r.Context(), tenantContextKey, tenant)
+			// Non-blocking last_used_at update — don't slow down the request path.
+			go func(id interface{ String() string }) {
+				_ = apiKeyStore.UpdateLastUsed(context.Background(), auth.KeyID)
+			}(auth.KeyID)
+
+			ctx := context.WithValue(r.Context(), authContextKey, auth)
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
 }
 
-func hashAPIKey(key string) string {
-	h := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(h[:])
+// RequireScope returns middleware that rejects requests whose API key lacks the given scope.
+// Keys with the "admin" scope pass all scope checks.
+func RequireScope(scope string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			auth := AuthFromContext(r.Context())
+			if auth == nil || !auth.HasScope(scope) {
+				writeError(w, http.StatusForbidden, "insufficient scope: "+scope+" required")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
-// HashAPIKey is exported for use when creating tenants.
+// HashAPIKey returns the SHA-256 hex digest of the given key.
 func HashAPIKey(key string) string {
-	return hashAPIKey(key)
+	h := sha256.Sum256([]byte(key))
+	return hex.EncodeToString(h[:])
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

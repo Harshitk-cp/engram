@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Harshitk-cp/engram/internal/domain"
+	"github.com/Harshitk-cp/engram/internal/store"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
@@ -99,6 +100,19 @@ func (m *mockMemoryStoreForConsolidation) GetByAgentForDecay(ctx context.Context
 func (m *mockMemoryStoreForConsolidation) Archive(ctx context.Context, id uuid.UUID) error {
 	m.archived = append(m.archived, id)
 	return nil
+}
+
+func (m *mockMemoryStoreForConsolidation) Restore(ctx context.Context, id uuid.UUID) error {
+	return nil
+}
+
+func (m *mockMemoryStoreForConsolidation) GetByIDOnly(ctx context.Context, id uuid.UUID) (*domain.Memory, error) {
+	for _, mem := range m.memories {
+		if mem.ID == id {
+			return &mem, nil
+		}
+	}
+	return nil, store.ErrNotFound
 }
 
 func (m *mockMemoryStoreForConsolidation) IncrementAccessAndBoost(ctx context.Context, id uuid.UUID, boost float32) error {

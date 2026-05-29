@@ -9,7 +9,21 @@ import (
 
 type TenantStore interface {
 	Create(ctx context.Context, t *Tenant) error
-	GetByAPIKeyHash(ctx context.Context, apiKeyHash string) (*Tenant, error)
+	GetByID(ctx context.Context, id uuid.UUID) (*Tenant, error)
+}
+
+type APIKeyStore interface {
+	// Create persists a new key. k.KeyHash must already be set.
+	Create(ctx context.Context, k *APIKey) error
+	// GetAuthByHash performs a single JOIN query and returns auth context for the given hash.
+	// Returns ErrNotFound if the key doesn't exist, is revoked, or is expired.
+	GetAuthByHash(ctx context.Context, hash string) (*APIKeyAuth, error)
+	// ListByTenantID returns all non-revoked keys for a tenant (prefix + metadata only).
+	ListByTenantID(ctx context.Context, tenantID uuid.UUID) ([]APIKey, error)
+	// Revoke sets revoked_at immediately, invalidating the key on the next request.
+	Revoke(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error
+	// UpdateLastUsed is called asynchronously on every authenticated request.
+	UpdateLastUsed(ctx context.Context, id uuid.UUID) error
 }
 
 type AgentStore interface {

@@ -183,7 +183,7 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 						continue
 					}
 
-					handled, err := s.handleTension(ctx, tension, &existing, m, result)
+					handled, err := s.handleTension(ctx, tension, &existing, m)
 					if err != nil {
 						return nil, err
 					}
@@ -532,7 +532,7 @@ func (s *MemoryService) Summarize(ctx context.Context, memories []domain.Memory)
 
 // handleTension applies graded contradiction rules. Returns true if the tension was handled
 // (meaning the caller should not proceed with reinforcement).
-func (s *MemoryService) handleTension(ctx context.Context, tension *domain.TensionResult, existing *domain.MemoryWithScore, m *domain.Memory, result *CreateResult) (bool, error) {
+func (s *MemoryService) handleTension(ctx context.Context, tension *domain.TensionResult, existing *domain.MemoryWithScore, m *domain.Memory) (bool, error) {
 	if tension == nil {
 		return false, nil
 	}
@@ -623,11 +623,11 @@ func (s *MemoryService) GetHotMemories(ctx context.Context, agentID uuid.UUID, t
 }
 
 type TierStats struct {
-	HotCount      int                             `json:"hot_count"`
-	WarmCount     int                             `json:"warm_count"`
-	ColdCount     int                             `json:"cold_count"`
-	ArchiveCount  int                             `json:"archive_count"`
-	Distribution  map[domain.MemoryType]TierDist  `json:"tier_distribution,omitempty"`
+	HotCount     int                            `json:"hot_count"`
+	WarmCount    int                            `json:"warm_count"`
+	ColdCount    int                            `json:"cold_count"`
+	ArchiveCount int                            `json:"archive_count"`
+	Distribution map[domain.MemoryType]TierDist `json:"tier_distribution,omitempty"`
 }
 
 type TierDist struct {

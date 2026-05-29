@@ -5,6 +5,7 @@ import (
 	"errors"
 
 	"github.com/Harshitk-cp/engram/internal/domain"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -19,19 +20,17 @@ func NewTenantStore(db *pgxpool.Pool) *TenantStore {
 
 func (s *TenantStore) Create(ctx context.Context, t *domain.Tenant) error {
 	return s.db.QueryRow(ctx,
-		`INSERT INTO tenants (name, api_key_hash) VALUES ($1, $2)
-		 RETURNING id, created_at, updated_at`,
-		t.Name, t.APIKeyHash,
+		`INSERT INTO tenants (name) VALUES ($1) RETURNING id, created_at, updated_at`,
+		t.Name,
 	).Scan(&t.ID, &t.CreatedAt, &t.UpdatedAt)
 }
 
-func (s *TenantStore) GetByAPIKeyHash(ctx context.Context, apiKeyHash string) (*domain.Tenant, error) {
+func (s *TenantStore) GetByID(ctx context.Context, id uuid.UUID) (*domain.Tenant, error) {
 	t := &domain.Tenant{}
 	err := s.db.QueryRow(ctx,
-		`SELECT id, name, api_key_hash, created_at, updated_at
-		 FROM tenants WHERE api_key_hash = $1`,
-		apiKeyHash,
-	).Scan(&t.ID, &t.Name, &t.APIKeyHash, &t.CreatedAt, &t.UpdatedAt)
+		`SELECT id, name, created_at, updated_at FROM tenants WHERE id = $1`,
+		id,
+	).Scan(&t.ID, &t.Name, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound

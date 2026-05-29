@@ -102,6 +102,11 @@ func EmbeddingAPIKey() string {
 	}
 }
 
+// SetupToken returns ENGRAM_SETUP_TOKEN. If empty, POST /v1/setup is disabled.
+func SetupToken() string {
+	return os.Getenv("ENGRAM_SETUP_TOKEN")
+}
+
 func MigrationsPath() string {
 	p := os.Getenv("MIGRATIONS_PATH")
 	if p == "" {
