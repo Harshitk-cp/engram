@@ -47,6 +47,11 @@ type GraphBuilder interface {
 	OnMemoryCreated(ctx context.Context, memory *domain.Memory) error
 }
 
+type boostJob struct {
+	id    uuid.UUID
+	boost float32
+}
+
 type MemoryService struct {
 	memoryStore        domain.MemoryStore
 	agentStore         domain.AgentStore
@@ -56,15 +61,29 @@ type MemoryService struct {
 	policyEnforcer     PolicyEnforcer
 	graphBuilder       GraphBuilder
 	logger             *zap.Logger
+	boostCh            chan boostJob
 }
 
 func NewMemoryService(ms domain.MemoryStore, as domain.AgentStore, ec domain.EmbeddingClient, lc domain.LLMClient, logger *zap.Logger) *MemoryService {
-	return &MemoryService{
+	svc := &MemoryService{
 		memoryStore:     ms,
 		agentStore:      as,
 		embeddingClient: ec,
 		llmClient:       lc,
 		logger:          logger,
+		boostCh:         make(chan boostJob, 500),
+	}
+	for i := 0; i < 3; i++ {
+		go svc.runBoostWorker()
+	}
+	return svc
+}
+
+func (s *MemoryService) runBoostWorker() {
+	for job := range s.boostCh {
+		if err := s.memoryStore.IncrementAccessAndBoost(context.Background(), job.id, job.boost); err != nil {
+			s.logger.Debug("failed to reinforce memory on usage", zap.String("memory_id", job.id.String()), zap.Error(err))
+		}
 	}
 }
 
@@ -240,6 +259,17 @@ func (s *MemoryService) Delete(ctx context.Context, id uuid.UUID, tenantID uuid.
 	return nil
 }
 
+func (s *MemoryService) Restore(ctx context.Context, id uuid.UUID) error {
+	err := s.memoryStore.Restore(ctx, id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ErrMemoryNotFound
+		}
+		return err
+	}
+	return nil
+}
+
 func (s *MemoryService) Recall(ctx context.Context, query string, agentID uuid.UUID, tenantID uuid.UUID, opts domain.RecallOpts) ([]domain.MemoryWithScore, error) {
 	if query == "" {
 		return nil, ErrRecallQueryEmpty
@@ -304,22 +334,19 @@ func (s *MemoryService) Recall(ctx context.Context, query string, agentID uuid.U
 		memories = memories[:opts.TopK]
 	}
 
-	// Usage reinforcement: recalled memories get a small confidence boost
-	// Cold/archive tier memories are logged for potential summarization
+	// Usage reinforcement: recalled memories get a small confidence boost (best-effort, non-blocking)
 	for _, mem := range memories {
 		tier := domain.ComputeTier(float64(mem.Confidence))
 		behavior := domain.GetTierBehavior(tier)
-
-		go func(id uuid.UUID, shouldSummarize bool) {
-			if err := s.memoryStore.IncrementAccessAndBoost(context.Background(), id, UsageReinforcementBoost); err != nil {
-				s.logger.Debug("failed to reinforce memory on usage", zap.String("memory_id", id.String()), zap.Error(err))
-			}
-			if shouldSummarize {
-				s.logger.Debug("cold tier memory accessed, candidate for summarization",
-					zap.String("memory_id", id.String()),
-					zap.String("tier", string(tier)))
-			}
-		}(mem.ID, behavior.SummarizeOnAccess)
+		if behavior.SummarizeOnAccess {
+			s.logger.Debug("cold tier memory accessed, candidate for summarization",
+				zap.String("memory_id", mem.ID.String()),
+				zap.String("tier", string(tier)))
+		}
+		select {
+		case s.boostCh <- boostJob{id: mem.ID, boost: UsageReinforcementBoost}:
+		default:
+		}
 	}
 
 	return memories, nil
@@ -397,11 +424,10 @@ func (s *MemoryService) RecallWithExplain(ctx context.Context, query string, age
 
 	// Usage reinforcement
 	for _, mem := range scored {
-		go func(id uuid.UUID) {
-			if err := s.memoryStore.IncrementAccessAndBoost(context.Background(), id, UsageReinforcementBoost); err != nil {
-				s.logger.Debug("failed to reinforce memory on usage", zap.String("memory_id", id.String()), zap.Error(err))
-			}
-		}(mem.ID)
+		select {
+		case s.boostCh <- boostJob{id: mem.ID, boost: UsageReinforcementBoost}:
+		default:
+		}
 	}
 
 	return scored, nil

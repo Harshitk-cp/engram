@@ -156,6 +156,30 @@ func (h *MemoryHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (h *MemoryHandler) Restore(w http.ResponseWriter, r *http.Request) {
+	if middleware.TenantFromContext(r.Context()) == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid memory id")
+		return
+	}
+
+	if err := h.svc.Restore(r.Context(), id); err != nil {
+		if errors.Is(err, service.ErrMemoryNotFound) {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to restore memory")
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
+}
+
 type memoryWithDecayStatus struct {
 	domain.MemoryWithScore
 	DecayStatus    string                  `json:"decay_status"`

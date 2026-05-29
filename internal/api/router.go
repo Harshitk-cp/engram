@@ -191,6 +191,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 			r.Post("/", memoryHandler.Create)
 			r.Get("/{id}", memoryHandler.GetByID)
 			r.Delete("/{id}", memoryHandler.Delete)
+			r.Post("/{id}/restore", memoryHandler.Restore)
 			r.Get("/{id}/mutations", learningHandler.GetMutationHistory)
 		})
 

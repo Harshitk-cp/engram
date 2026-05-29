@@ -157,32 +157,12 @@ func (s *LearningService) applyOutcomeEffect(ctx context.Context, memID uuid.UUI
 	return nil
 }
 
-// getMemoryByIDWithoutTenant is a helper to find a memory by ID.
+// getMemoryByIDWithoutTenant is a helper to find a memory by ID without requiring tenant context.
 func (s *LearningService) getMemoryByIDWithoutTenant(ctx context.Context, memID uuid.UUID) (*domain.Memory, error) {
-	// Try with nil tenant ID first
-	mem, err := s.memoryStore.GetByID(ctx, memID, uuid.Nil)
+	mem, err := s.memoryStore.GetByIDOnly(ctx, memID)
 	if err == nil {
 		return mem, nil
 	}
-
-	// For testing/compatibility, iterate agent memories
-	agentIDs, err := s.memoryStore.ListDistinctAgentIDs(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, agentID := range agentIDs {
-		memories, err := s.memoryStore.GetByAgentForDecay(ctx, agentID)
-		if err != nil {
-			continue
-		}
-		for i := range memories {
-			if memories[i].ID == memID {
-				return &memories[i], nil
-			}
-		}
-	}
-
 	return nil, ErrMemoryNotFound
 }
 

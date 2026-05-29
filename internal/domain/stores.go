@@ -58,6 +58,8 @@ type MemoryStore interface {
 	ListDistinctAgentIDs(ctx context.Context) ([]uuid.UUID, error)
 	GetByAgentForDecay(ctx context.Context, agentID uuid.UUID) ([]Memory, error)
 	Archive(ctx context.Context, id uuid.UUID) error
+	Restore(ctx context.Context, id uuid.UUID) error
+	GetByIDOnly(ctx context.Context, id uuid.UUID) (*Memory, error)
 	IncrementAccessAndBoost(ctx context.Context, id uuid.UUID, boost float32) error
 	// Tier methods
 	GetByTier(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, tier MemoryTier, limit int) ([]Memory, error)

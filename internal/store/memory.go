@@ -68,8 +68,24 @@ func (s *MemoryStore) GetByID(ctx context.Context, id uuid.UUID, tenantID uuid.U
 	m := &domain.Memory{}
 	err := s.db.QueryRow(ctx,
 		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, expires_at, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at
-		 FROM memories WHERE id = $1 AND tenant_id = $2`,
+		 FROM memories WHERE id = $1 AND tenant_id = $2 AND is_archived = FALSE`,
 		id, tenantID,
+	).Scan(&m.ID, &m.AgentID, &m.TenantID, &m.Type, &m.Content, &m.EmbeddingProvider, &m.EmbeddingModel, &m.Source, &m.Provenance, &m.Confidence, &m.Metadata, &m.ExpiresAt, &m.LastVerifiedAt, &m.ReinforcementCount, &m.DecayRate, &m.LastAccessedAt, &m.AccessCount, &m.CreatedAt, &m.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return m, nil
+}
+
+func (s *MemoryStore) GetByIDOnly(ctx context.Context, id uuid.UUID) (*domain.Memory, error) {
+	m := &domain.Memory{}
+	err := s.db.QueryRow(ctx,
+		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, expires_at, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at
+		 FROM memories WHERE id = $1 AND is_archived = FALSE LIMIT 1`,
+		id,
 	).Scan(&m.ID, &m.AgentID, &m.TenantID, &m.Type, &m.Content, &m.EmbeddingProvider, &m.EmbeddingModel, &m.Source, &m.Provenance, &m.Confidence, &m.Metadata, &m.ExpiresAt, &m.LastVerifiedAt, &m.ReinforcementCount, &m.DecayRate, &m.LastAccessedAt, &m.AccessCount, &m.CreatedAt, &m.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -111,6 +127,7 @@ func (s *MemoryStore) Recall(ctx context.Context, embedding []float32, agentID u
 	args = append(args, tenantID)
 
 	conditions = append(conditions, "embedding IS NOT NULL")
+	conditions = append(conditions, "is_archived = FALSE")
 
 	if opts.MemoryType != nil {
 		conditions = append(conditions, fmt.Sprintf("type = $%d", len(args)+1))
@@ -174,7 +191,7 @@ func (s *MemoryStore) Recall(ctx context.Context, embedding []float32, agentID u
 func (s *MemoryStore) CountByAgentAndType(ctx context.Context, agentID uuid.UUID, memType domain.MemoryType) (int, error) {
 	var count int
 	err := s.db.QueryRow(ctx,
-		`SELECT COUNT(*) FROM memories WHERE agent_id = $1 AND type = $2`,
+		`SELECT COUNT(*) FROM memories WHERE agent_id = $1 AND type = $2 AND is_archived = FALSE`,
 		agentID, memType,
 	).Scan(&count)
 	return count, err
@@ -183,7 +200,7 @@ func (s *MemoryStore) CountByAgentAndType(ctx context.Context, agentID uuid.UUID
 func (s *MemoryStore) ListOldestByAgentAndType(ctx context.Context, agentID uuid.UUID, memType domain.MemoryType, limit int) ([]domain.Memory, error) {
 	rows, err := s.db.Query(ctx,
 		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, expires_at, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at
-		 FROM memories WHERE agent_id = $1 AND type = $2
+		 FROM memories WHERE agent_id = $1 AND type = $2 AND is_archived = FALSE
 		 ORDER BY created_at ASC
 		 LIMIT $3`,
 		agentID, memType, limit,
@@ -232,7 +249,7 @@ func (s *MemoryStore) FindSimilar(ctx context.Context, agentID uuid.UUID, tenant
 		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at,
 		        1 - (embedding <=> $1) AS score
 		 FROM memories
-		 WHERE agent_id = $2 AND tenant_id = $3 AND embedding IS NOT NULL AND 1 - (embedding <=> $1) >= $4
+		 WHERE agent_id = $2 AND tenant_id = $3 AND embedding IS NOT NULL AND is_archived = FALSE AND 1 - (embedding <=> $1) >= $4
 		 ORDER BY score DESC`,
 		vec, agentID, tenantID, threshold,
 	)
@@ -293,7 +310,7 @@ func (s *MemoryStore) UpdateConfidence(ctx context.Context, id uuid.UUID, confid
 }
 
 func (s *MemoryStore) ListDistinctAgentIDs(ctx context.Context) ([]uuid.UUID, error) {
-	rows, err := s.db.Query(ctx, `SELECT DISTINCT agent_id FROM memories`)
+	rows, err := s.db.Query(ctx, `SELECT DISTINCT agent_id FROM memories WHERE is_archived = FALSE`)
 	if err != nil {
 		return nil, err
 	}
@@ -312,8 +329,8 @@ func (s *MemoryStore) ListDistinctAgentIDs(ctx context.Context) ([]uuid.UUID, er
 
 func (s *MemoryStore) GetByAgentForDecay(ctx context.Context, agentID uuid.UUID) ([]domain.Memory, error) {
 	rows, err := s.db.Query(ctx,
-		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, expires_at, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at
-		 FROM memories WHERE agent_id = $1`,
+		`SELECT id, agent_id, tenant_id, type, content, embedding, embedding_provider, embedding_model, source, provenance, confidence, metadata, expires_at, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at
+		 FROM memories WHERE agent_id = $1 AND is_archived = FALSE`,
 		agentID,
 	)
 	if err != nil {
@@ -324,9 +341,11 @@ func (s *MemoryStore) GetByAgentForDecay(ctx context.Context, agentID uuid.UUID)
 	var memories []domain.Memory
 	for rows.Next() {
 		var m domain.Memory
-		if err := rows.Scan(&m.ID, &m.AgentID, &m.TenantID, &m.Type, &m.Content, &m.EmbeddingProvider, &m.EmbeddingModel, &m.Source, &m.Provenance, &m.Confidence, &m.Metadata, &m.ExpiresAt, &m.LastVerifiedAt, &m.ReinforcementCount, &m.DecayRate, &m.LastAccessedAt, &m.AccessCount, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		var emb pgvector.Vector
+		if err := rows.Scan(&m.ID, &m.AgentID, &m.TenantID, &m.Type, &m.Content, &emb, &m.EmbeddingProvider, &m.EmbeddingModel, &m.Source, &m.Provenance, &m.Confidence, &m.Metadata, &m.ExpiresAt, &m.LastVerifiedAt, &m.ReinforcementCount, &m.DecayRate, &m.LastAccessedAt, &m.AccessCount, &m.CreatedAt, &m.UpdatedAt); err != nil {
 			return nil, err
 		}
+		m.Embedding = emb.Slice()
 		memories = append(memories, m)
 	}
 	return memories, rows.Err()
@@ -334,7 +353,21 @@ func (s *MemoryStore) GetByAgentForDecay(ctx context.Context, agentID uuid.UUID)
 
 func (s *MemoryStore) Archive(ctx context.Context, id uuid.UUID) error {
 	tag, err := s.db.Exec(ctx,
-		`DELETE FROM memories WHERE id = $1`,
+		`UPDATE memories SET is_archived = TRUE, archived_at = NOW(), updated_at = NOW() WHERE id = $1 AND is_archived = FALSE`,
+		id,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *MemoryStore) Restore(ctx context.Context, id uuid.UUID) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE memories SET is_archived = FALSE, archived_at = NULL, updated_at = NOW() WHERE id = $1 AND is_archived = TRUE`,
 		id,
 	)
 	if err != nil {
@@ -374,7 +407,7 @@ func (s *MemoryStore) GetByTier(ctx context.Context, agentID uuid.UUID, tenantID
 	rows, err := s.db.Query(ctx,
 		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, expires_at, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at
 		 FROM memories
-		 WHERE agent_id = $1 AND tenant_id = $2 AND confidence > $3 AND confidence <= $4
+		 WHERE agent_id = $1 AND tenant_id = $2 AND confidence > $3 AND confidence <= $4 AND is_archived = FALSE
 		 ORDER BY confidence DESC
 		 LIMIT $5`,
 		agentID, tenantID, thresholds.Min, thresholds.Max, limit,
@@ -406,7 +439,7 @@ func (s *MemoryStore) GetTierCounts(ctx context.Context, agentID uuid.UUID, tena
 			END as tier,
 			COUNT(*) as count
 		 FROM memories
-		 WHERE agent_id = $1 AND tenant_id = $2
+		 WHERE agent_id = $1 AND tenant_id = $2 AND is_archived = FALSE
 		 GROUP BY tier`,
 		agentID, tenantID,
 	)
@@ -449,7 +482,7 @@ func (s *MemoryStore) GetNeedsReview(ctx context.Context, agentID uuid.UUID, ten
 	rows, err := s.db.Query(ctx,
 		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, expires_at, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at
 		 FROM memories
-		 WHERE agent_id = $1 AND tenant_id = $2 AND needs_review = true
+		 WHERE agent_id = $1 AND tenant_id = $2 AND needs_review = true AND is_archived = FALSE
 		 ORDER BY updated_at DESC
 		 LIMIT $3`,
 		agentID, tenantID, limit,
