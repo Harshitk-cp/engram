@@ -35,6 +35,7 @@ const (
 	ProviderGemini    = "gemini"
 	ProviderCerebras  = "cerebras"
 	ProviderMock      = "mock"
+	ProviderNone = "none"
 )
 
 // NewClient creates an LLM client based on the provider name.
@@ -68,7 +69,11 @@ func NewClient(provider, apiKey string) (domain.LLMClient, error) {
 	case ProviderMock:
 		return NewMockClient(), nil
 
+	case ProviderNone, "":
+		// Embedding-only mode — no LLM client
+		return nil, nil
+
 	default:
-		return nil, fmt.Errorf("unknown LLM provider: %s (valid options: openai, anthropic, gemini, cerebras, mock)", provider)
+		return nil, fmt.Errorf("unknown LLM provider: %s (valid: openai, anthropic, gemini, cerebras, mock, none)", provider)
 	}
 }

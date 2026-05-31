@@ -47,17 +47,17 @@ func (s *GraphBuilderService) OnMemoryCreated(ctx context.Context, memory *domai
 	}
 
 	// 1. Extract entities
-	if err := s.extractAndLinkEntities(ctx, memory); err != nil {
-		// Log but don't fail
+	if s.llmClient != nil {
+		if err := s.extractAndLinkEntities(ctx, memory); err != nil {
+			// Log but don't fail
+		}
+		if err := s.detectAndCreateRelationships(ctx, memory); err != nil {
+			// Log but don't fail
+		}
 	}
 
-	// 2. Find similar memories and create thematic links
+	// 2. Thematic links
 	if err := s.createThematicLinks(ctx, memory); err != nil {
-		// Log but don't fail
-	}
-
-	// 3. Detect and create relationship edges
-	if err := s.detectAndCreateRelationships(ctx, memory); err != nil {
 		// Log but don't fail
 	}
 
