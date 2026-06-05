@@ -8,13 +8,14 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Harshitk-cp/engram/internal/domain"
 )
 
 const (
 	cerebrasAPIURL = "https://api.cerebras.ai/v1/chat/completions"
-	cerebrasModel  = "llama-3.3-70b"
+	cerebrasModel  = "gpt-oss-120b"
 )
 
 type CerebrasClient struct {
@@ -24,8 +25,8 @@ type CerebrasClient struct {
 
 func NewCerebrasClient(apiKey string) *CerebrasClient {
 	return &CerebrasClient{
-		apiKey:     apiKey,
-		httpClient: &http.Client{},
+		apiKey: apiKey,
+		httpClient: &http.Client{Timeout: 120 * time.Second},
 	}
 }
 
@@ -39,6 +40,7 @@ type cerebrasRequest struct {
 	Model       string            `json:"model"`
 	Messages    []cerebrasMessage `json:"messages"`
 	Temperature float32           `json:"temperature"`
+	MaxTokens   int               `json:"max_tokens,omitempty"`
 }
 
 type cerebrasResponse struct {
@@ -57,47 +59,65 @@ func (c *CerebrasClient) complete(ctx context.Context, messages []cerebrasMessag
 		Model:       cerebrasModel,
 		Messages:    messages,
 		Temperature: temp,
+		MaxTokens: 8000,
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal cerebras request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cerebrasAPIURL, bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("create cerebras request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	const maxRetries = 4
+	backoff := []int{15, 30, 60, 120} // seconds
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("cerebras request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	var lastErr error
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		if attempt > 0 {
+			wait := backoff[attempt-1]
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(time.Duration(wait) * time.Second):
+			}
+		}
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("read cerebras response: %w", err)
-	}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, cerebrasAPIURL, bytes.NewReader(body))
+		if err != nil {
+			return "", fmt.Errorf("create cerebras request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("cerebras API returned status %d: %s", resp.StatusCode, string(respBody))
-	}
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("cerebras request failed: %w", err)
+			continue
+		}
 
-	var result cerebrasResponse
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", fmt.Errorf("unmarshal cerebras response: %w", err)
-	}
+		respBody, err := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("read cerebras response: %w", err)
+			continue
+		}
 
-	if result.Error != nil {
-		return "", fmt.Errorf("cerebras API error: %s", result.Error.Message)
-	}
+		if resp.StatusCode == http.StatusTooManyRequests {
+			lastErr = fmt.Errorf("cerebras API returned status 429: %s", string(respBody))
+			continue
+		}
 
-	if len(result.Choices) == 0 {
-		return "", fmt.Errorf("cerebras API returned no choices")
-	}
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("cerebras API returned status %d: %s", resp.StatusCode, string(respBody))
+		}
 
-	return strings.TrimSpace(result.Choices[0].Message.Content), nil
+		var result cerebrasResponse
+		if err := json.Unmarshal(respBody, &result); err != nil {
+			return "", fmt.Errorf("unmarshal cerebras response: %w", err)
+		}
+		if len(result.Choices) == 0 {
+			return "", fmt.Errorf("cerebras returned no choices")
+		}
+		return result.Choices[0].Message.Content, nil
+	}
+	return "", lastErr
 }
 
 func (c *CerebrasClient) Classify(ctx context.Context, content string) (domain.MemoryType, error) {
@@ -149,6 +169,48 @@ func (c *CerebrasClient) Extract(ctx context.Context, conversation []domain.Mess
 	}
 
 	return extracted, nil
+}
+
+func (c *CerebrasClient) IngestConversation(ctx context.Context, messages []domain.Message) ([]domain.ExtractedConversationMemory, error) {
+	var sb strings.Builder
+	for _, msg := range messages {
+		sb.WriteString("[")
+		sb.WriteString(strings.ToUpper(msg.Role))
+		sb.WriteString("] ")
+		sb.WriteString(msg.Content)
+		sb.WriteString("\n")
+	}
+
+	apiMessages := []cerebrasMessage{
+		{Role: "user", Content: fmt.Sprintf(conversationIngestPrompt, sb.String())},
+	}
+
+	result, err := c.complete(ctx, apiMessages, 0.2)
+	if err != nil {
+		return nil, fmt.Errorf("ingest conversation: %w", err)
+	}
+
+	result = strings.TrimPrefix(result, "```json")
+	result = strings.TrimPrefix(result, "```")
+	result = strings.TrimSuffix(result, "```")
+	result = strings.TrimSpace(result)
+
+	var facts []domain.ExtractedConversationMemory
+	if err := json.Unmarshal([]byte(result), &facts); err != nil {
+		return nil, fmt.Errorf("parse ingest result: %w (raw: %s)", err, result)
+	}
+
+	for i := range facts {
+		if facts[i].EvidenceType != "" {
+			facts[i].Confidence = facts[i].EvidenceType.InitialConfidence()
+		} else if facts[i].Confidence == 0 {
+			facts[i].Confidence = domain.EvidenceExplicit.InitialConfidence()
+		}
+		if facts[i].Source == "" {
+			facts[i].Source = "user"
+		}
+	}
+	return facts, nil
 }
 
 func (c *CerebrasClient) Summarize(ctx context.Context, memories []domain.Memory) (string, error) {

@@ -69,8 +69,23 @@ func (s *HybridRecallService) Recall(ctx context.Context, req domain.HybridRecal
 		MemoryType:    req.MemoryType,
 		MinConfidence: req.MinConfidence,
 		IncludeTiers:  req.IncludeTiers,
+		RecencyBoost:  req.RecencyBoost,
+		EventDateFrom: req.EventDateFrom,
+		EventDateTo:   req.EventDateTo,
+		Mode:          req.Mode,
+		MinSimilarity: req.MinSimilarity,
+		MaxResults:    req.MaxResults,
 	}
-	vectorResults, err := s.memoryStore.Recall(ctx, embedding, req.AgentID, req.TenantID, recallOpts)
+
+	var vectorResults []domain.MemoryWithScore
+	switch req.Mode {
+	case domain.RecallModeExhaustive:
+		vectorResults, err = s.memoryStore.RecallExhaustive(ctx, embedding, req.AgentID, req.TenantID, recallOpts)
+	case domain.RecallModeHybrid:
+		vectorResults, err = s.memoryStore.RecallHybrid(ctx, req.Query, embedding, req.AgentID, req.TenantID, recallOpts)
+	default:
+		vectorResults, err = s.memoryStore.Recall(ctx, embedding, req.AgentID, req.TenantID, recallOpts)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -84,8 +99,8 @@ func (s *HybridRecallService) Recall(ctx context.Context, req domain.HybridRecal
 		}
 	}
 
-	// Step 2: Graph traversal (if enabled)
-	if req.UseGraph && s.graphStore != nil {
+	// Step 2: Graph traversal (similarity mode only)
+	if req.UseGraph && s.graphStore != nil && req.Mode != domain.RecallModeExhaustive && req.Mode != domain.RecallModeHybrid {
 		graphResults := s.traverseGraph(ctx, vectorResults, req.MaxGraphHops)
 
 		for _, gr := range graphResults {
