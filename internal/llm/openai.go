@@ -153,6 +153,48 @@ func (c *OpenAIClient) Extract(ctx context.Context, conversation []domain.Messag
 	return extracted, nil
 }
 
+func (c *OpenAIClient) IngestConversation(ctx context.Context, messages []domain.Message) ([]domain.ExtractedConversationMemory, error) {
+	var sb strings.Builder
+	for _, msg := range messages {
+		sb.WriteString("[")
+		sb.WriteString(strings.ToUpper(msg.Role))
+		sb.WriteString("] ")
+		sb.WriteString(msg.Content)
+		sb.WriteString("\n")
+	}
+
+	apiMessages := []chatMessage{
+		{Role: "user", Content: fmt.Sprintf(conversationIngestPrompt, sb.String())},
+	}
+
+	result, err := c.complete(ctx, apiMessages, 0.2)
+	if err != nil {
+		return nil, fmt.Errorf("ingest conversation: %w", err)
+	}
+
+	result = strings.TrimPrefix(result, "```json")
+	result = strings.TrimPrefix(result, "```")
+	result = strings.TrimSuffix(result, "```")
+	result = strings.TrimSpace(result)
+
+	var facts []domain.ExtractedConversationMemory
+	if err := json.Unmarshal([]byte(result), &facts); err != nil {
+		return nil, fmt.Errorf("parse ingest result: %w (raw: %s)", err, result)
+	}
+
+	for i := range facts {
+		if facts[i].EvidenceType != "" {
+			facts[i].Confidence = facts[i].EvidenceType.InitialConfidence()
+		} else if facts[i].Confidence == 0 {
+			facts[i].Confidence = domain.EvidenceExplicit.InitialConfidence()
+		}
+		if facts[i].Source == "" {
+			facts[i].Source = "user"
+		}
+	}
+	return facts, nil
+}
+
 func (c *OpenAIClient) Summarize(ctx context.Context, memories []domain.Memory) (string, error) {
 	var sb strings.Builder
 	for i, m := range memories {

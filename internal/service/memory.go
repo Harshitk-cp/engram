@@ -3,6 +3,9 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
+	"regexp"
 	"time"
 
 	"github.com/Harshitk-cp/engram/internal/domain"
@@ -11,6 +14,51 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
+
+var datePatternRE = regexp.MustCompile(`\[DATE:\s*([^\]]+)\]`)
+
+var eventDateFormats = []string{
+	"2006/01/02 (Mon) 15:04",
+	"2006/01/02 (Mon)",
+	"2006/01/02",
+	"2006-01-02T15:04:05Z07:00",
+	"2006-01-02T15:04:05",
+	"2006-01-02",
+	"January 2, 2006",
+}
+
+func extractEventDate(content string, metadata map[string]any) *time.Time {
+	if metadata != nil {
+		if dateStr, ok := metadata["session_date"].(string); ok && dateStr != "" {
+			if t := parseEventDate(dateStr); t != nil {
+				return t
+			}
+		}
+		if dateStr, ok := metadata["event_date"].(string); ok && dateStr != "" {
+			if t := parseEventDate(dateStr); t != nil {
+				return t
+			}
+		}
+	}
+
+	if m := datePatternRE.FindStringSubmatch(content); len(m) > 1 {
+		if t := parseEventDate(m[1]); t != nil {
+			return t
+		}
+	}
+
+	return nil
+}
+
+func parseEventDate(s string) *time.Time {
+	s = fmt.Sprintf("%s", s)
+	for _, layout := range eventDateFormats {
+		if t, err := time.Parse(layout, s); err == nil {
+			return &t
+		}
+	}
+	return nil
+}
 
 var (
 	ErrMemoryNotFound       = errors.New("memory not found")
@@ -26,8 +74,12 @@ type PolicyEnforcer interface {
 }
 
 const (
-	// SimilarityThreshold is the minimum embedding similarity
+	// SimilarityThreshold is the minimum embedding similarity for recall deduplication.
 	SimilarityThreshold = 0.60
+	// ContradictionCandidateThreshold is the lower threshold used when fetching candidates
+	ContradictionCandidateThreshold = 0.25
+	// typeAwareCandidateLimit is the maximum number of same-type memories retrieved as
+	typeAwareCandidateLimit = 15
 	ReinforcementThreshold = 0.85
 	// ReinforcementConfidenceBoost is added to confidence when a belief is reinforced.
 	ReinforcementConfidenceBoost = 0.05
@@ -69,7 +121,7 @@ type MemoryService struct {
 
 func NewMemoryService(ms domain.MemoryStore, as domain.AgentStore, ec domain.EmbeddingClient, lc domain.LLMClient, logger *zap.Logger) *MemoryService {
 	var detector contradiction.Detector
-	if lc != nil {
+	if lc != nil && os.Getenv("CONTRADICTION_MODE") != "embedding" {
 		detector = contradiction.NewLLMDetector(lc)
 	} else {
 		detector = contradiction.NewEmbeddingDetector()
@@ -138,6 +190,10 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 		return nil, ErrInvalidMemoryType
 	}
 
+	if m.EventDate == nil {
+		m.EventDate = extractEventDate(m.Content, m.Metadata)
+	}
+
 	// Classify memory type. Use LLM when available; fall back to keyword heuristic.
 	// The heuristic is always fast (<1ms) and handles ~85% of cases correctly.
 	if m.Type == "" {
@@ -181,13 +237,44 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 
 	result := &CreateResult{}
 
-	// Belief reinforcement and contradiction logic
+	const maxBeliefContentLen = 2000
+	if len(m.Content) > maxBeliefContentLen {
+		enableBeliefLogic = false
+	}
+
+	if enableBeliefLogic && m.Metadata != nil {
+		if src, ok := m.Metadata["ingest_source"].(string); ok && src == "conversation" {
+			enableBeliefLogic = false
+		}
+	}
+
 	if enableBeliefLogic && len(m.Embedding) > 0 {
-		similar, err := s.memoryStore.FindSimilar(ctx, m.AgentID, m.TenantID, m.Embedding, SimilarityThreshold)
+		similar, err := s.memoryStore.FindSimilar(ctx, m.AgentID, m.TenantID, m.Embedding, ContradictionCandidateThreshold)
 		if err != nil {
 			s.logger.Warn("failed to find similar beliefs", zap.Error(err))
-		} else if len(similar) > 0 {
-			for _, existing := range similar {
+		}
+
+		if m.Type == domain.MemoryTypePreference || m.Type == domain.MemoryTypeConstraint {
+			typed, err := s.memoryStore.GetRecentByType(ctx, m.AgentID, m.TenantID, m.Type, typeAwareCandidateLimit)
+			if err != nil {
+				s.logger.Warn("failed to fetch type-based candidates", zap.Error(err))
+			} else {
+				seen := make(map[string]bool, len(similar))
+				for _, s := range similar {
+					seen[s.ID.String()] = true
+				}
+				for _, t := range typed {
+					if !seen[t.ID.String()] {
+						similar = append(similar, t)
+					}
+				}
+			}
+		}
+
+		if len(similar) > 0 {
+			s.logger.Info("contradiction candidates found", zap.Int("count", len(similar)))
+			var reinforcementCandidate *domain.MemoryWithScore
+			for i, existing := range similar {
 				tension, err := s.contradictionDetector.CheckTension(
 					ctx,
 					existing.Content, m.Content,
@@ -198,33 +285,44 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 					continue
 				}
 
+				s.logger.Info("tension result",
+					zap.String("existing", existing.Content),
+					zap.String("incoming", m.Content),
+					zap.Float32("similarity", existing.Score),
+					zap.String("tension_type", string(tension.Type)),
+					zap.Float32("tension_score", tension.TensionScore),
+				)
+
 				handled, err := s.handleTension(ctx, tension, &existing, m)
 				if err != nil {
 					return nil, err
 				}
 				if handled {
+					s.logger.Info("contradiction handled", zap.String("type", string(tension.Type)), zap.String("existing_id", existing.ID.String()))
 					return result, nil
 				}
 
-				if existing.Score < ReinforcementThreshold {
-					continue
+				if reinforcementCandidate == nil && existing.Score >= ReinforcementThreshold {
+					reinforcementCandidate = &similar[i]
 				}
-				newConfidence := existing.Confidence + ReinforcementConfidenceBoost
+			}
+
+			if reinforcementCandidate != nil {
+				newConfidence := reinforcementCandidate.Confidence + ReinforcementConfidenceBoost
 				if newConfidence > MaxConfidence {
 					newConfidence = MaxConfidence
 				}
-				newCount := existing.ReinforcementCount + 1
-
-				if err := s.memoryStore.UpdateReinforcement(ctx, existing.ID, newConfidence, newCount); err != nil {
+				newCount := reinforcementCandidate.ReinforcementCount + 1
+				if err := s.memoryStore.UpdateReinforcement(ctx, reinforcementCandidate.ID, newConfidence, newCount); err != nil {
 					s.logger.Warn("failed to reinforce belief", zap.Error(err))
 				} else {
-					m.ID = existing.ID
+					m.ID = reinforcementCandidate.ID
 					m.Confidence = newConfidence
 					m.ReinforcementCount = newCount
-					m.CreatedAt = existing.CreatedAt
-					m.UpdatedAt = existing.UpdatedAt
+					m.CreatedAt = reinforcementCandidate.CreatedAt
+					m.UpdatedAt = reinforcementCandidate.UpdatedAt
 					result.Reinforced = true
-					result.ReinforcedMemoryID = existing.ID
+					result.ReinforcedMemoryID = reinforcementCandidate.ID
 					return result, nil
 				}
 			}
@@ -555,7 +653,7 @@ func (s *MemoryService) handleTension(ctx context.Context, tension *domain.Tensi
 
 	switch tension.Type {
 	case domain.ContradictionHard:
-		if tension.TensionScore <= 0.5 {
+		if tension.TensionScore <= 0.25 {
 			return false, nil
 		}
 		// Demote old belief significantly, create new
@@ -617,7 +715,13 @@ func (s *MemoryService) handleTension(ctx context.Context, tension *domain.Tensi
 			// Low tension - treat as reinforcement, fall through
 			return false, nil
 		}
-		// Moderate soft tension - create new without demoting old
+		newOldConfidence := existing.Confidence - (ContradictionConfidencePenalty / 2)
+		if newOldConfidence < MinConfidence {
+			newOldConfidence = MinConfidence
+		}
+		if err := s.memoryStore.UpdateConfidence(ctx, existing.ID, newOldConfidence); err != nil {
+			s.logger.Warn("failed to reduce soft-contradicted belief confidence", zap.Error(err))
+		}
 		if err := s.memoryStore.Create(ctx, m); err != nil {
 			return false, err
 		}

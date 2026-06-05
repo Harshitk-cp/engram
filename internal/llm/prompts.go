@@ -1,5 +1,43 @@
 package llm
 
+const conversationIngestPrompt = `You are a memory extraction system. Extract every specific, retrievable fact from this conversation — from BOTH the user and the assistant.
+
+A fact is worth storing if someone could later ask "what was X?" and this fact would answer it.
+
+From USER turns, extract:
+- Personal facts: preferences, possessions, counts, dates, events, experiences, decisions
+- Confirmations of things the assistant said
+
+From ASSISTANT turns, extract:
+- Named items recommended or mentioned: restaurants, products, apps, websites, brands, people, places
+- Items from SHORT lists (under ~10 items), noting position: "The 7th item was X"
+- Specific values provided: quantities, ratios, durations, prices, chapter numbers, phone numbers, handles
+- Named people, roles, dates, and attributions stated in prose: "Dr. X announced Y", "the case was decided in 2014"
+- Content the assistant created or produced: schedules, assignments, plans, recipes, descriptions
+- Technical facts stated: algorithm names, language names, tool names, methods
+
+Rules:
+- source="user" for user statements, source="assistant" for assistant statements
+- Be specific and self-contained: "Assistant recommended Roscioli near the Vatican" not "Assistant gave a recommendation"
+- Do NOT transcribe long numbered lists (10+ items) item-by-item — they are preserved verbatim automatically. Name the list's topic once and spend the fact budget on prose details instead.
+- Max 30 facts total. Prioritise specificity over generality.
+- Only skip a turn if it contains zero extractable content (pure greetings, "ok thanks", etc.)
+
+type must be one of: preference, fact, decision, constraint
+evidence_type must be one of: explicit_statement, implicit_inference, behavioral_signal
+
+Conversation:
+%s
+
+Respond ONLY with a JSON array. No markdown, no explanation.
+[
+  {"type":"fact","content":"User wants a romantic Italian restaurant near the Vatican","source":"user","evidence_type":"explicit_statement"},
+  {"type":"fact","content":"Assistant recommended Roscioli restaurant near the Vatican for a romantic dinner","source":"assistant","evidence_type":"explicit_statement"},
+  {"type":"fact","content":"The 7th item in the assistant's list of work-from-home jobs for seniors is Transcriptionist","source":"assistant","evidence_type":"explicit_statement"},
+  {"type":"preference","content":"User prefers non-touristy restaurants","source":"user","evidence_type":"explicit_statement"},
+  {"type":"fact","content":"Assistant recommended Memrise as the language app that uses mnemonics","source":"assistant","evidence_type":"explicit_statement"}
+]`
+
 const extractPrompt = `You are a memory extraction system. Analyze the following conversation and extract distinct memories.
 
 For each memory, determine:
@@ -40,16 +78,24 @@ Statement B: %s
 
 Answer only "true" or "false". No explanation.`
 
-const tensionPrompt = `Analyze the relationship between these two statements:
-Statement A: %s
-Statement B: %s
+const tensionPrompt = `Analyze the relationship between these two statements about the same person or entity:
+Statement A (older belief): %s
+Statement B (newer belief): %s
 
 Classify the tension type:
-- none: No conflict, compatible statements
-- hard: Direct logical contradiction, both cannot be true
-- soft: Some tension but both could be true in different ways
-- contextual: Depends on unstated context or conditions
-- temporal: True at different times (belief evolution)
+- none: No conflict. Statements are compatible or about unrelated topics.
+- hard: Direct logical contradiction. Both cannot simultaneously be true (e.g. "lives in NYC" vs "lives in London").
+- soft: Mild tension. Both could be true in different contexts or interpretations.
+- contextual: Conflict depends on unstated context or conditions.
+- temporal: Belief evolution. B supersedes A because a preference, opinion, or situation changed over time.
+  Use "temporal" when: B expresses a preference comparison ("prefers X over Y", "likes X more than Y"),
+  or B explicitly updates A ("now uses X", "switched to X", "no longer does Y"), or B corrects A.
+
+Rules:
+- Prefer "temporal" over "hard" when the conflict is about changing preferences or opinions.
+- A tension_score of 0.0 means no tension; 1.0 means maximum tension.
+- For "temporal": tension_score reflects how clearly B supersedes A (high = clear supersession).
+- For "none": tension_score must be 0.0.
 
 Respond ONLY with JSON, no markdown:
 {"type":"none|hard|soft|contextual|temporal","tension_score":0.0,"explanation":"brief reason"}`

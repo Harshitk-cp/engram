@@ -41,6 +41,14 @@ const (
 	ScoringWeighted ScoringMode = "weighted"
 )
 
+type RecallMode string
+
+const (
+	RecallModeSimilarity RecallMode = "similarity"
+	RecallModeExhaustive RecallMode = "exhaustive"
+	RecallModeHybrid RecallMode = "hybrid"
+)
+
 type RecallOpts struct {
 	TopK          int
 	MemoryType    *MemoryType
@@ -48,6 +56,12 @@ type RecallOpts struct {
 	Scoring       ScoringMode
 	Explain       bool
 	IncludeTiers  []MemoryTier
+	RecencyBoost float32
+	EventDateFrom *time.Time
+	EventDateTo   *time.Time
+	Mode RecallMode
+	MinSimilarity float32
+	MaxResults int
 }
 
 type MemoryWithScore struct {
@@ -60,12 +74,15 @@ type MemoryStore interface {
 	GetByID(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) (*Memory, error)
 	Delete(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error
 	Recall(ctx context.Context, embedding []float32, agentID uuid.UUID, tenantID uuid.UUID, opts RecallOpts) ([]MemoryWithScore, error)
+	RecallExhaustive(ctx context.Context, queryEmbedding []float32, agentID uuid.UUID, tenantID uuid.UUID, opts RecallOpts) ([]MemoryWithScore, error)
+	RecallHybrid(ctx context.Context, query string, queryEmbedding []float32, agentID uuid.UUID, tenantID uuid.UUID, opts RecallOpts) ([]MemoryWithScore, error)
 	CountByAgentAndType(ctx context.Context, agentID uuid.UUID, memType MemoryType) (int, error)
 	ListOldestByAgentAndType(ctx context.Context, agentID uuid.UUID, memType MemoryType, limit int) ([]Memory, error)
 	DeleteExpired(ctx context.Context) (int64, error)
 	DeleteByRetention(ctx context.Context, agentID uuid.UUID, memType MemoryType, retentionDays int) (int64, error)
 	// Belief system methods
 	FindSimilar(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, embedding []float32, threshold float32) ([]MemoryWithScore, error)
+	GetRecentByType(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, memType MemoryType, limit int) ([]MemoryWithScore, error)
 	UpdateReinforcement(ctx context.Context, id uuid.UUID, confidence float32, reinforcementCount int) error
 	UpdateConfidence(ctx context.Context, id uuid.UUID, confidence float32) error
 	// Decay methods
@@ -149,6 +166,7 @@ type EmbeddingClient interface {
 type LLMClient interface {
 	Classify(ctx context.Context, content string) (MemoryType, error)
 	Extract(ctx context.Context, conversation []Message) ([]ExtractedMemory, error)
+	IngestConversation(ctx context.Context, messages []Message) ([]ExtractedConversationMemory, error)
 	Summarize(ctx context.Context, memories []Memory) (string, error)
 	CheckContradiction(ctx context.Context, stmtA, stmtB string) (bool, error)
 	CheckTension(ctx context.Context, stmtA, stmtB string) (*TensionResult, error)

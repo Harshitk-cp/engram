@@ -13,6 +13,7 @@ const (
 	MemoryTypeFact       MemoryType = "fact"
 	MemoryTypeDecision   MemoryType = "decision"
 	MemoryTypeConstraint MemoryType = "constraint"
+	MemoryTypeBelief MemoryType = "belief"
 )
 
 type EvidenceType string
@@ -86,7 +87,7 @@ func (p Provenance) InitialConfidence() float32 {
 
 func ValidMemoryType(t string) bool {
 	switch MemoryType(t) {
-	case MemoryTypePreference, MemoryTypeFact, MemoryTypeDecision, MemoryTypeConstraint:
+	case MemoryTypePreference, MemoryTypeFact, MemoryTypeDecision, MemoryTypeConstraint, MemoryTypeBelief:
 		return true
 	}
 	return false
@@ -105,6 +106,7 @@ type Memory struct {
 	Provenance         Provenance     `json:"provenance"`
 	Confidence         float32        `json:"confidence"`
 	Metadata           map[string]any `json:"metadata,omitempty"`
+	EventDate          *time.Time     `json:"event_date,omitempty"`
 	ExpiresAt          *time.Time     `json:"expires_at,omitempty"`
 	LastVerifiedAt     *time.Time     `json:"last_verified_at,omitempty"`
 	ReinforcementCount int            `json:"reinforcement_count"`
@@ -113,4 +115,31 @@ type Memory struct {
 	AccessCount        int            `json:"access_count"`
 	CreatedAt          time.Time      `json:"created_at"`
 	UpdatedAt          time.Time      `json:"updated_at"`
+	SourceMemoryID *uuid.UUID `json:"source_memory_id,omitempty"`
+	BeliefSubject  string     `json:"belief_subject,omitempty"`
+	BeliefPredicate string    `json:"belief_predicate,omitempty"`
+	BeliefObject   string     `json:"belief_object,omitempty"`
+}
+
+type ConversationIngestRequest struct {
+	AgentID   uuid.UUID      `json:"agent_id"`
+	TenantID  uuid.UUID      `json:"-"`
+	Messages  []Message      `json:"messages"`
+	EventDate *time.Time     `json:"event_date,omitempty"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
+	Sync 	  bool 		     `json:"sync"`
+}
+
+type IngestResult struct {
+	Stored   []*Memory `json:"stored"`
+	Skipped  int       `json:"skipped"`
+	Duration int64     `json:"duration_ms"`
+}
+
+type ExtractedConversationMemory struct {
+	Type         MemoryType   `json:"type"`
+	Content      string       `json:"content"`
+	Confidence   float32      `json:"confidence,omitempty"`
+	EvidenceType EvidenceType `json:"evidence_type,omitempty"`
+	Source string `json:"source"`
 }

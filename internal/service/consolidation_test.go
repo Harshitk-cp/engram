@@ -73,6 +73,10 @@ func (m *mockMemoryStoreForConsolidation) FindSimilar(ctx context.Context, agent
 	return nil, nil
 }
 
+func (m *mockMemoryStoreForConsolidation) GetRecentByType(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, memType domain.MemoryType, limit int) ([]domain.MemoryWithScore, error) {
+	return nil, nil
+}
+
 func (m *mockMemoryStoreForConsolidation) UpdateReinforcement(ctx context.Context, id uuid.UUID, confidence float32, reinforcementCount int) error {
 	m.updated[id] = confidence
 	return nil

@@ -14,7 +14,7 @@ import (
 
 const (
 	anthropicMessagesURL = "https://api.anthropic.com/v1/messages"
-	anthropicModel       = "claude-3-5-haiku-20241022"
+	anthropicModel       = "claude-haiku-4-5-20251001"
 	anthropicVersion     = "2023-06-01"
 )
 
@@ -150,6 +150,48 @@ func (c *AnthropicClient) Extract(ctx context.Context, conversation []domain.Mes
 	}
 
 	return extracted, nil
+}
+
+func (c *AnthropicClient) IngestConversation(ctx context.Context, messages []domain.Message) ([]domain.ExtractedConversationMemory, error) {
+	var sb strings.Builder
+	for _, msg := range messages {
+		sb.WriteString("[")
+		sb.WriteString(strings.ToUpper(msg.Role))
+		sb.WriteString("] ")
+		sb.WriteString(msg.Content)
+		sb.WriteString("\n")
+	}
+
+	apiMessages := []anthropicMessage{
+		{Role: "user", Content: fmt.Sprintf(conversationIngestPrompt, sb.String())},
+	}
+
+	result, err := c.complete(ctx, apiMessages, 2048)
+	if err != nil {
+		return nil, fmt.Errorf("ingest conversation: %w", err)
+	}
+
+	result = strings.TrimPrefix(result, "```json")
+	result = strings.TrimPrefix(result, "```")
+	result = strings.TrimSuffix(result, "```")
+	result = strings.TrimSpace(result)
+
+	var facts []domain.ExtractedConversationMemory
+	if err := json.Unmarshal([]byte(result), &facts); err != nil {
+		return nil, fmt.Errorf("parse ingest result: %w (raw: %s)", err, result)
+	}
+
+	for i := range facts {
+		if facts[i].EvidenceType != "" {
+			facts[i].Confidence = facts[i].EvidenceType.InitialConfidence()
+		} else if facts[i].Confidence == 0 {
+			facts[i].Confidence = domain.EvidenceExplicit.InitialConfidence()
+		}
+		if facts[i].Source == "" {
+			facts[i].Source = "user"
+		}
+	}
+	return facts, nil
 }
 
 func (c *AnthropicClient) Summarize(ctx context.Context, memories []domain.Memory) (string, error) {

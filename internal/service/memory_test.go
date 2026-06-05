@@ -101,7 +101,10 @@ func (m *mockMemoryStore) DeleteByRetention(ctx context.Context, agentID uuid.UU
 }
 
 func (m *mockMemoryStore) FindSimilar(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, embedding []float32, threshold float32) ([]domain.MemoryWithScore, error) {
-	// Return empty slice - no similar memories by default
+	return []domain.MemoryWithScore{}, nil
+}
+
+func (m *mockMemoryStore) GetRecentByType(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, memType domain.MemoryType, limit int) ([]domain.MemoryWithScore, error) {
 	return []domain.MemoryWithScore{}, nil
 }
 

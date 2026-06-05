@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"runtime"
 	"sync/atomic"
 	"time"
@@ -109,7 +110,9 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	// Wire policy enforcer and contradiction store into memory service
 	memorySvc.SetPolicyEnforcer(policySvc)
 	memorySvc.SetContradictionStore(contradictionStore)
-	memorySvc.SetGraphBuilder(graphBuilderSvc)
+	if os.Getenv("DISABLE_GRAPH") != "true" {
+		memorySvc.SetGraphBuilder(graphBuilderSvc)
+	}
 
 	// Wire memory store into episode service for belief extraction
 	episodeSvc.SetMemoryStore(memoryStore)
@@ -135,6 +138,8 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	tierHandler := handlers.NewTierHandler(memorySvc)
 	graphHandler := handlers.NewGraphHandler(hybridRecallSvc, graphBuilderSvc, graphStore, entityStore)
 	learningHandler := handlers.NewLearningHandler(learningSvc, implicitFeedbackSvc, mutationLogStore)
+	conversationSvc := service.NewConversationService(memorySvc, llmClient, logger)
+	conversationHandler := handlers.NewConversationHandler(conversationSvc)
 
 	r := chi.NewRouter()
 
@@ -196,6 +201,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 				r.Get("/tier-stats", tierHandler.GetTierStats)
 				r.Get("/hot-memories", tierHandler.GetHotMemories)
 				r.Get("/learning/stats", learningHandler.GetStats)
+				r.Post("/conversations/ingest", conversationHandler.Ingest)
 			})
 		})
 

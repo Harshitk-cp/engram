@@ -221,6 +221,12 @@ type HybridRecallRequest struct {
 	MinConfidence float32      `json:"min_confidence,omitempty"`
 	MemoryType    *MemoryType  `json:"memory_type,omitempty"`
 	IncludeTiers  []MemoryTier `json:"include_tiers,omitempty"`
+	RecencyBoost float32 `json:"recency_boost,omitempty"`
+	EventDateFrom *time.Time `json:"event_date_from,omitempty"`
+	EventDateTo   *time.Time `json:"event_date_to,omitempty"`
+	Mode          RecallMode `json:"mode,omitempty"`
+	MinSimilarity float32    `json:"min_similarity,omitempty"`
+	MaxResults    int        `json:"max_results,omitempty"`
 }
 
 type ScoredMemory struct {

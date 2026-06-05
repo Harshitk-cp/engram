@@ -31,6 +31,8 @@ type MockClient struct {
 	ExtractEntitiesError            error
 	DetectRelationshipsResponse     []domain.DetectedRelationship
 	DetectRelationshipsError        error
+	IngestConversationResponse      []domain.ExtractedConversationMemory
+	IngestConversationError         error
 
 	// Call tracking for assertions
 	ClassifyCalls                 []string
@@ -44,6 +46,7 @@ type MockClient struct {
 	DetectImplicitFeedbackCalls   []struct{ Memories []domain.Memory; Conversation []domain.Message }
 	ExtractEntitiesCalls          []string
 	DetectRelationshipsCalls      []struct{ Memory *domain.Memory; Similar []domain.MemoryWithScore }
+	IngestConversationCalls       [][]domain.Message
 }
 
 func NewMockClient() *MockClient {
@@ -165,6 +168,14 @@ func (c *MockClient) DetectRelationships(ctx context.Context, memory *domain.Mem
 		return nil, c.DetectRelationshipsError
 	}
 	return c.DetectRelationshipsResponse, nil
+}
+
+func (c *MockClient) IngestConversation(ctx context.Context, messages []domain.Message) ([]domain.ExtractedConversationMemory, error) {
+	c.IngestConversationCalls = append(c.IngestConversationCalls, messages)
+	if c.IngestConversationError != nil {
+		return nil, c.IngestConversationError
+	}
+	return c.IngestConversationResponse, nil
 }
 
 // Reset clears all recorded calls and resets responses to defaults.

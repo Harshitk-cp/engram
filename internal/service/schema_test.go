@@ -185,6 +185,10 @@ func (m *mockMemoryStoreForSchema) FindSimilar(ctx context.Context, agentID uuid
 	return []domain.MemoryWithScore{}, nil
 }
 
+func (m *mockMemoryStoreForSchema) GetRecentByType(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, memType domain.MemoryType, limit int) ([]domain.MemoryWithScore, error) {
+	return []domain.MemoryWithScore{}, nil
+}
+
 func (m *mockMemoryStoreForSchema) UpdateReinforcement(ctx context.Context, id uuid.UUID, confidence float32, reinforcementCount int) error {
 	return nil
 }

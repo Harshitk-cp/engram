@@ -57,10 +57,10 @@ func (s *MemoryStore) Create(ctx context.Context, m *domain.Memory) error {
 	}
 
 	return s.db.QueryRow(ctx,
-		`INSERT INTO memories (agent_id, tenant_id, type, content, embedding, embedding_provider, embedding_model, source, provenance, confidence, metadata, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), $12, $13, NOW(), 0)
+		`INSERT INTO memories (agent_id, tenant_id, type, content, embedding, embedding_provider, embedding_model, source, provenance, confidence, metadata, event_date, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $14, NOW(), $12, $13, NOW(), 0)
 		 RETURNING id, created_at, updated_at, last_verified_at, last_accessed_at`,
-		m.AgentID, m.TenantID, m.Type, m.Content, embedding, m.EmbeddingProvider, m.EmbeddingModel, m.Source, m.Provenance, m.Confidence, m.Metadata, m.ReinforcementCount, m.DecayRate,
+		m.AgentID, m.TenantID, m.Type, m.Content, embedding, m.EmbeddingProvider, m.EmbeddingModel, m.Source, m.Provenance, m.Confidence, m.Metadata, m.ReinforcementCount, m.DecayRate, m.EventDate,
 	).Scan(&m.ID, &m.CreatedAt, &m.UpdatedAt, &m.LastVerifiedAt, &m.LastAccessedAt)
 }
 
@@ -139,6 +139,15 @@ func (s *MemoryStore) Recall(ctx context.Context, embedding []float32, agentID u
 		args = append(args, opts.MinConfidence)
 	}
 
+	if opts.EventDateFrom != nil {
+		conditions = append(conditions, fmt.Sprintf("COALESCE(event_date, created_at) >= $%d", len(args)+1))
+		args = append(args, *opts.EventDateFrom)
+	}
+	if opts.EventDateTo != nil {
+		conditions = append(conditions, fmt.Sprintf("COALESCE(event_date, created_at) <= $%d", len(args)+1))
+		args = append(args, *opts.EventDateTo)
+	}
+
 	// Add the embedding parameter
 	embeddingParam := len(args) + 1
 	args = append(args, vec)
@@ -147,18 +156,54 @@ func (s *MemoryStore) Recall(ctx context.Context, embedding []float32, agentID u
 	limitParam := len(args) + 1
 	args = append(args, opts.TopK)
 
-	query := fmt.Sprintf(
-		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at,
-		        1 - (embedding <=> $%d) AS score
-		 FROM memories
-		 WHERE %s
-		 ORDER BY embedding <=> $%d ASC
-		 LIMIT $%d`,
-		embeddingParam,
-		strings.Join(conditions, " AND "),
-		embeddingParam,
-		limitParam,
-	)
+	var query string
+	if opts.RecencyBoost > 0 {
+		recencyParam := len(args) + 1
+		args = append(args, opts.RecencyBoost)
+		query = fmt.Sprintf(
+			`WITH ranked AS (
+			   SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model,
+			          source, provenance, confidence, metadata, event_date, last_verified_at, reinforcement_count,
+			          decay_rate, last_accessed_at, access_count, created_at, updated_at,
+			          (embedding <=> $%d) AS vec_dist,
+			          COALESCE(
+			            EXTRACT(EPOCH FROM (COALESCE(event_date, created_at)
+			              - MIN(COALESCE(event_date, created_at)) OVER (PARTITION BY agent_id))) /
+			            NULLIF(EXTRACT(EPOCH FROM (
+			              MAX(COALESCE(event_date, created_at)) OVER (PARTITION BY agent_id)
+			            - MIN(COALESCE(event_date, created_at)) OVER (PARTITION BY agent_id)
+			            )), 0),
+			            0.5
+			          ) AS relative_recency
+			   FROM memories
+			   WHERE %s
+			 )
+			 SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model,
+			        source, provenance, confidence, metadata, event_date, last_verified_at, reinforcement_count,
+			        decay_rate, last_accessed_at, access_count, created_at, updated_at,
+			        (1 - vec_dist) + $%d * relative_recency AS score
+			 FROM ranked
+			 ORDER BY vec_dist - $%d * relative_recency ASC
+			 LIMIT $%d`,
+			embeddingParam,
+			strings.Join(conditions, " AND "),
+			recencyParam, recencyParam,
+			limitParam,
+		)
+	} else {
+		query = fmt.Sprintf(
+			`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, event_date, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at,
+			        1 - (embedding <=> $%d) AS score
+			 FROM memories
+			 WHERE %s
+			 ORDER BY embedding <=> $%d ASC
+			 LIMIT $%d`,
+			embeddingParam,
+			strings.Join(conditions, " AND "),
+			embeddingParam,
+			limitParam,
+		)
+	}
 
 	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
@@ -172,7 +217,8 @@ func (s *MemoryStore) Recall(ctx context.Context, embedding []float32, agentID u
 		err := rows.Scan(
 			&ms.ID, &ms.AgentID, &ms.TenantID, &ms.Type, &ms.Content,
 			&ms.EmbeddingProvider, &ms.EmbeddingModel,
-			&ms.Source, &ms.Provenance, &ms.Confidence, &ms.Metadata, &ms.LastVerifiedAt, &ms.ReinforcementCount, &ms.DecayRate, &ms.LastAccessedAt, &ms.AccessCount, &ms.CreatedAt, &ms.UpdatedAt,
+			&ms.Source, &ms.Provenance, &ms.Confidence, &ms.Metadata, &ms.EventDate,
+			&ms.LastVerifiedAt, &ms.ReinforcementCount, &ms.DecayRate, &ms.LastAccessedAt, &ms.AccessCount, &ms.CreatedAt, &ms.UpdatedAt,
 			&ms.Score,
 		)
 		if err != nil {
@@ -186,6 +232,175 @@ func (s *MemoryStore) Recall(ctx context.Context, embedding []float32, agentID u
 	}
 
 	return results, nil
+}
+
+func (s *MemoryStore) RecallExhaustive(ctx context.Context, queryEmbedding []float32, agentID uuid.UUID, tenantID uuid.UUID, opts domain.RecallOpts) ([]domain.MemoryWithScore, error) {
+	minSim := opts.MinSimilarity
+	if minSim <= 0 {
+		minSim = 0.25
+	}
+	maxResults := opts.MaxResults
+	if maxResults <= 0 {
+		maxResults = 500
+	}
+
+	var allResults []domain.MemoryWithScore
+	pageSize := 1000
+	offset := 0
+
+	for {
+		rows, err := s.db.Query(ctx,
+			`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model,
+			        source, provenance, confidence, metadata, event_date, last_verified_at,
+			        reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at,
+			        embedding
+			 FROM memories
+			 WHERE agent_id = $1 AND tenant_id = $2 AND embedding IS NOT NULL AND is_archived = FALSE
+			 ORDER BY created_at
+			 LIMIT $3 OFFSET $4`,
+			agentID, tenantID, pageSize, offset,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("exhaustive recall page: %w", err)
+		}
+
+		var pageResults []domain.MemoryWithScore
+		for rows.Next() {
+			var ms domain.MemoryWithScore
+			var embVec pgvector.Vector
+			err := rows.Scan(
+				&ms.ID, &ms.AgentID, &ms.TenantID, &ms.Type, &ms.Content,
+				&ms.EmbeddingProvider, &ms.EmbeddingModel,
+				&ms.Source, &ms.Provenance, &ms.Confidence, &ms.Metadata, &ms.EventDate,
+				&ms.LastVerifiedAt, &ms.ReinforcementCount, &ms.DecayRate,
+				&ms.LastAccessedAt, &ms.AccessCount, &ms.CreatedAt, &ms.UpdatedAt,
+				&embVec,
+			)
+			if err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("exhaustive scan: %w", err)
+			}
+			sim := cosineSimilarity(queryEmbedding, embVec.Slice())
+			if sim >= minSim {
+				ms.Score = sim
+				pageResults = append(pageResults, ms)
+			}
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("exhaustive rows: %w", err)
+		}
+
+		allResults = append(allResults, pageResults...)
+		if len(pageResults) < pageSize {
+			break
+		}
+		offset += pageSize
+		if len(allResults) >= maxResults {
+			break
+		}
+	}
+
+	sortByScore(allResults)
+	if len(allResults) > maxResults {
+		allResults = allResults[:maxResults]
+	}
+	return allResults, nil
+}
+
+func (s *MemoryStore) RecallHybrid(ctx context.Context, query string, queryEmbedding []float32, agentID uuid.UUID, tenantID uuid.UUID, opts domain.RecallOpts) ([]domain.MemoryWithScore, error) {
+	topK := opts.TopK
+	if topK <= 0 {
+		topK = 10
+	}
+
+	vec := pgvector.NewVector(queryEmbedding)
+
+	var typeCondition string
+	var args []any
+	args = append(args, agentID, tenantID, query, vec, topK)
+
+	if opts.MemoryType != nil {
+		typeCondition = "AND type = $6"
+		args = append(args, string(*opts.MemoryType))
+	}
+
+	hybridQuery := fmt.Sprintf(`
+		WITH bm25_ranked AS (
+		  SELECT id,
+		         ts_rank(content_tsv, plainto_tsquery('english', $3)) AS bm25_score,
+		         ROW_NUMBER() OVER (ORDER BY ts_rank(content_tsv, plainto_tsquery('english', $3)) DESC) AS bm25_rank
+		  FROM memories
+		  WHERE agent_id = $1 AND tenant_id = $2 AND is_archived = FALSE
+		    AND content_tsv @@ plainto_tsquery('english', $3) %s
+		),
+		vec_ranked AS (
+		  SELECT id,
+		         1 - (embedding <=> $4) AS vec_score,
+		         ROW_NUMBER() OVER (ORDER BY embedding <=> $4 ASC) AS vec_rank
+		  FROM memories
+		  WHERE agent_id = $1 AND tenant_id = $2 AND embedding IS NOT NULL AND is_archived = FALSE %s
+		  LIMIT 100
+		),
+		rrf AS (
+		  SELECT
+		    COALESCE(b.id, v.id) AS id,
+		    (1.0 / (60 + COALESCE(b.bm25_rank, 1000))) + (1.0 / (60 + COALESCE(v.vec_rank, 1000))) AS rrf_score
+		  FROM bm25_ranked b
+		  FULL OUTER JOIN vec_ranked v ON b.id = v.id
+		)
+		SELECT m.id, m.agent_id, m.tenant_id, m.type, m.content, m.embedding_provider, m.embedding_model,
+		       m.source, m.provenance, m.confidence, m.metadata, m.event_date, m.last_verified_at,
+		       m.reinforcement_count, m.decay_rate, m.last_accessed_at, m.access_count,
+		       m.created_at, m.updated_at, r.rrf_score AS score
+		FROM rrf r JOIN memories m ON m.id = r.id
+		WHERE m.is_archived = FALSE
+		ORDER BY r.rrf_score DESC
+		LIMIT $5
+	`, typeCondition, typeCondition)
+
+	rows, err := s.db.Query(ctx, hybridQuery, args...)
+	if err != nil {
+		return nil, fmt.Errorf("hybrid recall: %w", err)
+	}
+	defer rows.Close()
+
+	var results []domain.MemoryWithScore
+	for rows.Next() {
+		var ms domain.MemoryWithScore
+		err := rows.Scan(
+			&ms.ID, &ms.AgentID, &ms.TenantID, &ms.Type, &ms.Content,
+			&ms.EmbeddingProvider, &ms.EmbeddingModel,
+			&ms.Source, &ms.Provenance, &ms.Confidence, &ms.Metadata, &ms.EventDate,
+			&ms.LastVerifiedAt, &ms.ReinforcementCount, &ms.DecayRate,
+			&ms.LastAccessedAt, &ms.AccessCount, &ms.CreatedAt, &ms.UpdatedAt,
+			&ms.Score,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("hybrid scan: %w", err)
+		}
+		results = append(results, ms)
+	}
+	return results, rows.Err()
+}
+
+func cosineSimilarity(a, b []float32) float32 {
+	if len(a) != len(b) {
+		return 0
+	}
+	var dot float32
+	for i := range a {
+		dot += a[i] * b[i]
+	}
+	return dot
+}
+
+func sortByScore(ms []domain.MemoryWithScore) {
+	for i := 1; i < len(ms); i++ {
+		for j := i; j > 0 && ms[j].Score > ms[j-1].Score; j-- {
+			ms[j], ms[j-1] = ms[j-1], ms[j]
+		}
+	}
 }
 
 func (s *MemoryStore) CountByAgentAndType(ctx context.Context, agentID uuid.UUID, memType domain.MemoryType) (int, error) {
@@ -247,6 +462,7 @@ func (s *MemoryStore) FindSimilar(ctx context.Context, agentID uuid.UUID, tenant
 
 	rows, err := s.db.Query(ctx,
 		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at,
+		        embedding::text,
 		        1 - (embedding <=> $1) AS score
 		 FROM memories
 		 WHERE agent_id = $2 AND tenant_id = $3 AND embedding IS NOT NULL AND is_archived = FALSE AND 1 - (embedding <=> $1) >= $4
@@ -261,15 +477,18 @@ func (s *MemoryStore) FindSimilar(ctx context.Context, agentID uuid.UUID, tenant
 	var results []domain.MemoryWithScore
 	for rows.Next() {
 		var ms domain.MemoryWithScore
+		var embVec pgvector.Vector
 		err := rows.Scan(
 			&ms.ID, &ms.AgentID, &ms.TenantID, &ms.Type, &ms.Content,
 			&ms.EmbeddingProvider, &ms.EmbeddingModel,
 			&ms.Source, &ms.Provenance, &ms.Confidence, &ms.Metadata, &ms.LastVerifiedAt, &ms.ReinforcementCount, &ms.DecayRate, &ms.LastAccessedAt, &ms.AccessCount, &ms.CreatedAt, &ms.UpdatedAt,
+			&embVec,
 			&ms.Score,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("scan find similar row: %w", err)
 		}
+		ms.Embedding = embVec.Slice()
 		results = append(results, ms)
 	}
 
@@ -278,6 +497,41 @@ func (s *MemoryStore) FindSimilar(ctx context.Context, agentID uuid.UUID, tenant
 	}
 
 	return results, nil
+}
+
+func (s *MemoryStore) GetRecentByType(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, memType domain.MemoryType, limit int) ([]domain.MemoryWithScore, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at,
+		        embedding::text,
+		        1.0::float4 AS score
+		 FROM memories
+		 WHERE agent_id = $1 AND tenant_id = $2 AND type = $3 AND is_archived = FALSE
+		 ORDER BY created_at DESC
+		 LIMIT $4`,
+		agentID, tenantID, string(memType), limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get recent by type: %w", err)
+	}
+	defer rows.Close()
+
+	var results []domain.MemoryWithScore
+	for rows.Next() {
+		var ms domain.MemoryWithScore
+		var embVec pgvector.Vector
+		if err := rows.Scan(
+			&ms.ID, &ms.AgentID, &ms.TenantID, &ms.Type, &ms.Content,
+			&ms.EmbeddingProvider, &ms.EmbeddingModel,
+			&ms.Source, &ms.Provenance, &ms.Confidence, &ms.Metadata, &ms.LastVerifiedAt, &ms.ReinforcementCount, &ms.DecayRate, &ms.LastAccessedAt, &ms.AccessCount, &ms.CreatedAt, &ms.UpdatedAt,
+			&embVec,
+			&ms.Score,
+		); err != nil {
+			return nil, fmt.Errorf("scan get recent by type: %w", err)
+		}
+		ms.Embedding = embVec.Slice()
+		results = append(results, ms)
+	}
+	return results, rows.Err()
 }
 
 // UpdateReinforcement atomically updates confidence, reinforcement_count, and last_verified_at.

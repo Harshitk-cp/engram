@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Harshitk-cp/engram/internal/api/middleware"
 	"github.com/Harshitk-cp/engram/internal/domain"
@@ -30,6 +31,7 @@ type createMemoryRequest struct {
 	Source     string         `json:"source,omitempty"`
 	Confidence float32        `json:"confidence,omitempty"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
+	EventDate string `json:"event_date,omitempty"`
 }
 
 type createMemoryResponse struct {
@@ -72,6 +74,14 @@ func (h *MemoryHandler) Create(w http.ResponseWriter, r *http.Request) {
 		Source:     req.Source,
 		Confidence: req.Confidence,
 		Metadata:   req.Metadata,
+	}
+	if req.EventDate != "" {
+		for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05", "2006-01-02"} {
+			if t, err := time.Parse(layout, req.EventDate); err == nil {
+				memory.EventDate = &t
+				break
+			}
+		}
 	}
 
 	result, err := h.svc.Create(r.Context(), memory)
@@ -277,6 +287,44 @@ func (h *MemoryHandler) Recall(w http.ResponseWriter, r *http.Request) {
 
 	if tiersStr := r.URL.Query().Get("include_tiers"); tiersStr != "" {
 		req.IncludeTiers = parseIncludeTiers(tiersStr)
+	}
+
+	if rbStr := r.URL.Query().Get("recency_boost"); rbStr != "" {
+		if rb, err := strconv.ParseFloat(rbStr, 32); err == nil && rb >= 0 && rb <= 1 {
+			req.RecencyBoost = float32(rb)
+		}
+	}
+
+	if fromStr := r.URL.Query().Get("event_date_from"); fromStr != "" {
+		if t, err := time.Parse(time.RFC3339, fromStr); err == nil {
+			req.EventDateFrom = &t
+		} else if t, err := time.Parse("2006-01-02", fromStr); err == nil {
+			req.EventDateFrom = &t
+		}
+	}
+	if toStr := r.URL.Query().Get("event_date_to"); toStr != "" {
+		if t, err := time.Parse(time.RFC3339, toStr); err == nil {
+			req.EventDateTo = &t
+		} else if t, err := time.Parse("2006-01-02", toStr); err == nil {
+			req.EventDateTo = &t
+		}
+	}
+
+	if modeStr := r.URL.Query().Get("mode"); modeStr != "" {
+		switch domain.RecallMode(modeStr) {
+		case domain.RecallModeSimilarity, domain.RecallModeExhaustive, domain.RecallModeHybrid:
+			req.Mode = domain.RecallMode(modeStr)
+		}
+	}
+	if msStr := r.URL.Query().Get("min_similarity"); msStr != "" {
+		if ms, err := strconv.ParseFloat(msStr, 32); err == nil && ms >= 0 && ms <= 1 {
+			req.MinSimilarity = float32(ms)
+		}
+	}
+	if mrStr := r.URL.Query().Get("max_results"); mrStr != "" {
+		if mr, err := strconv.Atoi(mrStr); err == nil && mr > 0 {
+			req.MaxResults = mr
+		}
 	}
 
 	results, err := h.hybridSvc.Recall(r.Context(), req)

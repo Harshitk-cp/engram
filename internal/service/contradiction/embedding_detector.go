@@ -10,8 +10,9 @@ import (
 
 const (
 	// contradictionZoneLower is the minimum cosine similarity for two memories to be
-	// considered potentially contradictory. Below this they are unrelated topics.
-	contradictionZoneLower float32 = 0.60
+	// considered potentially contradictory. Matches ContradictionCandidateThreshold in
+	// memory.go — below this they are unrelated topics.
+	contradictionZoneLower float32 = 0.50
 
 	// contradictionZoneUpper is the maximum similarity before two memories are
 	// considered near-duplicates (and thus reinforcement candidates, not contradictions).
@@ -26,10 +27,12 @@ const (
 
 // temporalMarkers indicate belief evolution (new supersedes old).
 var temporalMarkers = []string{
-	"now ", "currently ", "recently ", "as of ", "starting ",
+	"as of ", "starting from ", "starting to ",
 	"moved to ", "moved from ", "switched to ", "changed to ",
-	" new ", "no longer ", "used to ", "formerly ", "these days",
-	"nowadays ", "just ", "update:", "updated ",
+	"no longer ", "used to ", "formerly ",
+	"update:", "updated my ", "updating my ",
+	"rather than ", "instead of ",
+	"prefer ", "prefers ", "preferred ",
 }
 
 // negationMarkers indicate a hard factual contradiction.
