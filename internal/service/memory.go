@@ -95,7 +95,26 @@ const (
 	DefaultRecallMinConfidence = 0.6
 	// UsageReinforcementBoost is the small boost applied when a memory is recalled.
 	UsageReinforcementBoost = 0.02
+	// SessionPromotionThreshold is the reinforcement count at which a recurring
+	SessionPromotionThreshold = 3
 )
+
+func sameAnchorCandidates(candidates []domain.MemoryWithScore, anchorID *uuid.UUID) []domain.MemoryWithScore {
+	out := candidates[:0]
+	for _, c := range candidates {
+		if sameAnchor(c.AnchorID, anchorID) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func sameAnchor(a, b *uuid.UUID) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
 
 type GraphBuilder interface {
 	OnMemoryCreated(ctx context.Context, memory *domain.Memory) error
@@ -177,6 +196,13 @@ func (s *MemoryService) Create(ctx context.Context, m *domain.Memory) (*CreateRe
 func (s *MemoryService) CreateWithoutBeliefLogic(ctx context.Context, m *domain.Memory) error {
 	_, err := s.createWithOptions(ctx, m, false)
 	return err
+}
+
+func (s *MemoryService) CreateCanon(ctx context.Context, m *domain.Memory) (*CreateResult, error) {
+	m.Binding = domain.BindingCanon
+	m.AnchorID = nil
+	m.SessionID = nil
+	return s.createWithOptions(ctx, m, false)
 }
 
 func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory, enableBeliefLogic bool) (*CreateResult, error) {
@@ -271,6 +297,8 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 			}
 		}
 
+		similar = sameAnchorCandidates(similar, m.AnchorID)
+
 		if len(similar) > 0 {
 			s.logger.Info("contradiction candidates found", zap.Int("count", len(similar)))
 			var reinforcementCandidate *domain.MemoryWithScore
@@ -323,6 +351,20 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 					m.UpdatedAt = reinforcementCandidate.UpdatedAt
 					result.Reinforced = true
 					result.ReinforcedMemoryID = reinforcementCandidate.ID
+
+
+					if reinforcementCandidate.Binding == domain.BindingSession &&
+						reinforcementCandidate.AnchorID != nil &&
+						newCount >= SessionPromotionThreshold {
+						if promoted, err := s.memoryStore.PromoteSessionToAnchor(ctx, reinforcementCandidate.ID); err != nil {
+							s.logger.Warn("failed to promote session memory", zap.Error(err))
+						} else if promoted {
+							m.Binding = domain.BindingAnchored
+							m.SessionID = nil
+							s.logger.Info("promoted session memory to anchor",
+								zap.String("memory_id", reinforcementCandidate.ID.String()))
+						}
+					}
 					return result, nil
 				}
 			}

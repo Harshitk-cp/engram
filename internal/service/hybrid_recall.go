@@ -13,6 +13,7 @@ type HybridRecallService struct {
 	memoryStore    domain.MemoryStore
 	graphStore     domain.GraphStore
 	entityStore    domain.EntityStore
+	sessionStore   domain.SessionStore
 	embeddingClient domain.EmbeddingClient
 	llmClient      domain.LLMClient
 }
@@ -31,6 +32,10 @@ func NewHybridRecallService(
 		embeddingClient: embeddingClient,
 		llmClient:      llmClient,
 	}
+}
+
+func (s *HybridRecallService) SetSessionStore(ss domain.SessionStore) {
+	s.sessionStore = ss
 }
 
 const (
@@ -75,13 +80,23 @@ func (s *HybridRecallService) Recall(ctx context.Context, req domain.HybridRecal
 		Mode:          req.Mode,
 		MinSimilarity: req.MinSimilarity,
 		MaxResults:    req.MaxResults,
+		AnchorID:      req.AnchorID,
 	}
 
+	mode := req.Mode
+	if req.AgentID == uuid.Nil {
+		mode = domain.RecallModeSimilarity
+	}
+
+	composed := req.AnchorID != nil || req.SessionID != nil
+
 	var vectorResults []domain.MemoryWithScore
-	switch req.Mode {
-	case domain.RecallModeExhaustive:
+	switch {
+	case composed:
+		vectorResults, err = s.composedRecall(ctx, req, embedding, recallOpts)
+	case mode == domain.RecallModeExhaustive:
 		vectorResults, err = s.memoryStore.RecallExhaustive(ctx, embedding, req.AgentID, req.TenantID, recallOpts)
-	case domain.RecallModeHybrid:
+	case mode == domain.RecallModeHybrid:
 		vectorResults, err = s.memoryStore.RecallHybrid(ctx, req.Query, embedding, req.AgentID, req.TenantID, recallOpts)
 	default:
 		vectorResults, err = s.memoryStore.Recall(ctx, embedding, req.AgentID, req.TenantID, recallOpts)
@@ -99,8 +114,7 @@ func (s *HybridRecallService) Recall(ctx context.Context, req domain.HybridRecal
 		}
 	}
 
-	// Step 2: Graph traversal (similarity mode only)
-	if req.UseGraph && s.graphStore != nil && req.Mode != domain.RecallModeExhaustive && req.Mode != domain.RecallModeHybrid {
+	if req.UseGraph && !composed && s.graphStore != nil && mode != domain.RecallModeExhaustive && mode != domain.RecallModeHybrid {
 		graphResults := s.traverseGraph(ctx, vectorResults, req.MaxGraphHops)
 
 		for _, gr := range graphResults {
@@ -141,6 +155,77 @@ func (s *HybridRecallService) Recall(ctx context.Context, req domain.HybridRecal
 	}
 
 	return results, nil
+}
+
+func (s *HybridRecallService) composedRecall(ctx context.Context, req domain.HybridRecallRequest, embedding []float32, base domain.RecallOpts) ([]domain.MemoryWithScore, error) {
+	anchorID := req.AnchorID
+	if anchorID == nil && req.SessionID != nil && s.sessionStore != nil {
+		if sess, err := s.sessionStore.GetByID(ctx, *req.SessionID, req.TenantID); err == nil {
+			anchorID = sess.AnchorID
+		}
+	}
+
+	budget := req.TopK
+	if budget < 4 {
+		budget = 4
+	}
+	canonCap := req.TopK / 4
+	if canonCap < 1 {
+		canonCap = 1
+	}
+
+	type group struct {
+		binding domain.MemoryBinding
+		agentID uuid.UUID
+		cap     int
+		boost   float32
+	}
+	var groups []group
+	if req.AgentID != uuid.Nil {
+		groups = append(groups, group{domain.BindingPrivate, req.AgentID, budget, 0})
+	}
+	groups = append(groups, group{domain.BindingCanon, uuid.Nil, canonCap, 0})
+	if anchorID != nil {
+		groups = append(groups, group{domain.BindingAnchored, req.AgentID, budget, 0.05})
+	}
+	if req.SessionID != nil {
+		groups = append(groups, group{domain.BindingSession, req.AgentID, budget, 0.10})
+	}
+
+	seen := make(map[uuid.UUID]bool)
+	var merged []domain.MemoryWithScore
+	for _, g := range groups {
+		binding := g.binding
+		opts := base
+		opts.Binding = &binding
+		opts.TopK = g.cap
+		opts.AnchorID = nil
+		opts.SessionID = nil
+		if binding == domain.BindingAnchored {
+			opts.AnchorID = anchorID
+		}
+		if binding == domain.BindingSession {
+			opts.SessionID = req.SessionID
+		}
+		res, err := s.memoryStore.Recall(ctx, embedding, g.agentID, req.TenantID, opts)
+		if err != nil {
+			return nil, err
+		}
+		n := 0
+		for _, r := range res {
+			if n >= g.cap {
+				break
+			}
+			if seen[r.ID] {
+				continue
+			}
+			seen[r.ID] = true
+			r.Score *= 1 + g.boost
+			merged = append(merged, r)
+			n++
+		}
+	}
+	return merged, nil
 }
 
 type queueItem struct {

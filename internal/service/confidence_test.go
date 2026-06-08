@@ -51,6 +51,14 @@ func (m *mockMemoryStoreForConfidence) Recall(ctx context.Context, embedding []f
 	return nil, nil
 }
 
+func (m *mockMemoryStoreForConfidence) RecallExhaustive(ctx context.Context, queryEmbedding []float32, agentID uuid.UUID, tenantID uuid.UUID, opts domain.RecallOpts) ([]domain.MemoryWithScore, error) {
+	return nil, nil
+}
+
+func (m *mockMemoryStoreForConfidence) RecallHybrid(ctx context.Context, query string, queryEmbedding []float32, agentID uuid.UUID, tenantID uuid.UUID, opts domain.RecallOpts) ([]domain.MemoryWithScore, error) {
+	return nil, nil
+}
+
 func (m *mockMemoryStoreForConfidence) CountByAgentAndType(ctx context.Context, agentID uuid.UUID, memType domain.MemoryType) (int, error) {
 	return 0, nil
 }
@@ -131,6 +139,14 @@ func (m *mockMemoryStoreForConfidence) GetTierCounts(ctx context.Context, agentI
 
 func (m *mockMemoryStoreForConfidence) SetNeedsReview(ctx context.Context, id uuid.UUID, needsReview bool) error {
 	return nil
+}
+
+func (m *mockMemoryStoreForConfidence) ArchiveExpiredSessionMemories(ctx context.Context) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockMemoryStoreForConfidence) PromoteSessionToAnchor(ctx context.Context, id uuid.UUID) (bool, error) {
+	return false, nil
 }
 
 func (m *mockMemoryStoreForConfidence) GetNeedsReview(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, limit int) ([]domain.Memory, error) {

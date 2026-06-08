@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/Harshitk-cp/engram/internal/domain"
 	"github.com/google/uuid"
@@ -28,6 +29,90 @@ func (s *EntityStore) Create(ctx context.Context, e *domain.Entity) error {
 		 RETURNING id, created_at, updated_at`,
 		e.AgentID, e.Name, e.EntityType, e.Aliases, e.Metadata,
 	).Scan(&e.ID, &e.CreatedAt, &e.UpdatedAt)
+}
+
+func (s *EntityStore) CreateAnchor(ctx context.Context, a *domain.Entity, agentID *uuid.UUID) error {
+	if a.EntityType == "" {
+		a.EntityType = domain.EntityPerson
+	}
+	var externalID *string
+	if a.ExternalID != "" {
+		externalID = &a.ExternalID
+	}
+	a.IsAnchor = true
+	return s.db.QueryRow(ctx,
+		`INSERT INTO entities (tenant_id, agent_id, name, entity_type, aliases, metadata, is_anchor, external_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, TRUE, $7)
+		 ON CONFLICT (tenant_id, external_id) WHERE is_anchor = TRUE AND external_id IS NOT NULL
+		 DO UPDATE SET name = EXCLUDED.name,
+		               aliases = ARRAY(SELECT DISTINCT unnest(entities.aliases || EXCLUDED.aliases)),
+		               updated_at = NOW()
+		 RETURNING id, created_at, updated_at`,
+		a.TenantID, agentID, a.Name, a.EntityType, a.Aliases, a.Metadata, externalID,
+	).Scan(&a.ID, &a.CreatedAt, &a.UpdatedAt)
+}
+
+func scanAnchor(row pgx.Row) (*domain.Entity, error) {
+	e := &domain.Entity{}
+	err := row.Scan(&e.ID, &e.TenantID, &e.AgentID,
+		&e.Name, &e.EntityType, &e.Aliases, &e.Metadata, &e.IsAnchor, &e.ExternalID,
+		&e.CreatedAt, &e.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	return e, nil
+}
+
+const anchorCols = `id, tenant_id, COALESCE(agent_id, '00000000-0000-0000-0000-000000000000'::uuid),
+	name, entity_type, aliases, metadata, is_anchor, COALESCE(external_id, ''), created_at, updated_at`
+
+func (s *EntityStore) GetAnchor(ctx context.Context, id, tenantID uuid.UUID) (*domain.Entity, error) {
+	return scanAnchor(s.db.QueryRow(ctx,
+		`SELECT `+anchorCols+` FROM entities
+		 WHERE id = $1 AND tenant_id = $2 AND is_anchor = TRUE`,
+		id, tenantID))
+}
+
+func (s *EntityStore) FindAnchorByExternalID(ctx context.Context, tenantID uuid.UUID, externalID string) (*domain.Entity, error) {
+	return scanAnchor(s.db.QueryRow(ctx,
+		`SELECT `+anchorCols+` FROM entities
+		 WHERE tenant_id = $1 AND external_id = $2 AND is_anchor = TRUE`,
+		tenantID, externalID))
+}
+
+func (s *EntityStore) ListAnchors(ctx context.Context, tenantID uuid.UUID, entityType domain.EntityType, limit int) ([]domain.Entity, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	args := []any{tenantID}
+	typeClause := ""
+	if entityType != "" {
+		args = append(args, string(entityType))
+		typeClause = "AND entity_type = $2"
+	}
+	args = append(args, limit)
+	rows, err := s.db.Query(ctx,
+		fmt.Sprintf(`SELECT `+anchorCols+` FROM entities
+		 WHERE tenant_id = $1 AND is_anchor = TRUE `+typeClause+`
+		 ORDER BY name LIMIT $%d`, len(args)),
+		args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var anchors []domain.Entity
+	for rows.Next() {
+		e, err := scanAnchor(rows)
+		if err != nil {
+			return nil, err
+		}
+		anchors = append(anchors, *e)
+	}
+	return anchors, rows.Err()
 }
 
 func (s *EntityStore) GetByID(ctx context.Context, id uuid.UUID) (*domain.Entity, error) {

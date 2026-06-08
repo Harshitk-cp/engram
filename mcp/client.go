@@ -62,8 +62,10 @@ type AgentResult struct {
 	CreatedAt  string `json:"created_at"`
 }
 
-// Remember stores a memory in Engram. confidence=0 lets the server assign the default.
-func (c *Client) Remember(ctx context.Context, agentID, content, memType, source string, confidence float32) (*MemoryResult, error) {
+// Remember stores a memory in Engram. confidence=0 lets the server assign the
+// default. anchor is the caller's own id for who/what the memory is about; when
+// set, the trace is bound to that anchor (which must already exist).
+func (c *Client) Remember(ctx context.Context, agentID, content, memType, source, anchor, session string, confidence float32) (*MemoryResult, error) {
 	if agentID == "" {
 		agentID = c.agentID
 	}
@@ -78,6 +80,12 @@ func (c *Client) Remember(ctx context.Context, agentID, content, memType, source
 	if confidence > 0 {
 		body["confidence"] = confidence
 	}
+	if anchor != "" {
+		body["anchor_external_id"] = anchor
+	}
+	if session != "" {
+		body["session_id"] = session
+	}
 
 	var result MemoryResult
 	if err := c.post(ctx, "/v1/memories", body, &result); err != nil {
@@ -86,8 +94,9 @@ func (c *Client) Remember(ctx context.Context, agentID, content, memType, source
 	return &result, nil
 }
 
-// Recall retrieves memories matching a query.
-func (c *Client) Recall(ctx context.Context, agentID, query string, topK int, graphWeight float64) ([]RecallMemory, error) {
+// Recall retrieves memories matching a query. anchor (the caller's own id for a
+// subject) restricts recall to traces about that anchor.
+func (c *Client) Recall(ctx context.Context, agentID, query string, topK int, graphWeight float64, anchor, session string) ([]RecallMemory, error) {
 	if agentID == "" {
 		agentID = c.agentID
 	}
@@ -101,6 +110,12 @@ func (c *Client) Recall(ctx context.Context, agentID, query string, topK int, gr
 	params.Set("top_k", strconv.Itoa(topK))
 	if graphWeight > 0 {
 		params.Set("graph_weight", strconv.FormatFloat(graphWeight, 'f', 2, 64))
+	}
+	if anchor != "" {
+		params.Set("anchor_external_id", anchor)
+	}
+	if session != "" {
+		params.Set("session_id", session)
 	}
 
 	var resp struct {

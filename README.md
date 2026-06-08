@@ -4,6 +4,23 @@
 
 Engram stores, retrieves, and injects typed memory into agent prompts via a simple HTTP API. Memories gain confidence when reinforced, lose confidence when contradicted, and fade when unused.
 
+## Benchmarks
+
+Engram scores **91.4% on [LongMemEval](https://github.com/xiaowu0162/LongMemEval)** — the ICLR 2025 benchmark for long-term conversational memory (500 questions over chat histories scalable past 1M tokens) — and **92.3% averaged across its six task types**.
+
+| Task type | Engram |
+|---|---:|
+| Knowledge update | 100.0% |
+| Abstention | 100.0% |
+| Single-session (user fact) | 98.4% |
+| Single-session (preference) | 93.3% |
+| Single-session (assistant) | 89.3% |
+| Multi-session | 90.2% |
+| Temporal reasoning | 82.3% |
+| **Overall (500 questions)** | **91.4%** |
+
+Measured with Engram as the memory store + retrieval layer, graded by LongMemEval's standard LLM judge. Full per-task breakdown, methodology, and how to read memory benchmarks: **[hakuya.ai/#benchmarks](https://hakuya.ai/#benchmarks)** · **[docs.hakuya.ai/benchmarks](https://docs.hakuya.ai/benchmarks)**.
+
 ## Quick Start
 
 ```bash
@@ -70,6 +87,32 @@ Memories are tiered by confidence for efficient retrieval:
 - **Contradiction**: Conflicting beliefs decrease confidence (-0.2)
 - **Decay**: Unused memories gradually lose confidence
 - **Usage Boost**: Recalled memories gain small confidence (+0.02)
+
+### Multi-Subject Memory (Anchors, Sessions, Canon)
+
+One agent can act on behalf of thousands of **subjects** (customers, guests, patients) with full isolation. Every memory carries a server-derived **binding**:
+
+| Binding | Bound to | Set by |
+|---|---|---|
+| `private` | the forming agent (default — unchanged behavior) | no extra ids |
+| `anchored` | a specific **anchor** (a subject) | `anchor_external_id` |
+| `session` | one conversation (short-term, decays fast) | `session_id` |
+| `canon` | tenant-shared org knowledge (policies, catalog) | `POST /v1/canon` (admin) |
+
+```bash
+# Store a fact ABOUT a subject (anchor auto-created on first use)
+curl -X POST http://localhost:8080/v1/memories -H "Authorization: Bearer $API_KEY" \
+  -d '{"agent_id":"AGENT","content":"Guest is vegetarian","anchor_external_id":"guest-42"}'
+
+# Recall is isolated per subject — guest-99's data never leaks into guest-42's results
+curl "http://localhost:8080/v1/memories/recall?agent_id=AGENT&query=diet&anchor_external_id=guest-42" \
+  -H "Authorization: Bearer $API_KEY"
+
+# GDPR per-subject erasure
+curl -X DELETE "http://localhost:8080/v1/anchors/ANCHOR_ID?purge=true" -H "Authorization: Bearer $API_KEY"
+```
+
+Passing only `agent_id` preserves today's exact behavior. Endpoints: `/v1/anchors`, `/v1/sessions`, `/v1/canon`. See the [Subjects, Sessions & Canon guide](https://docs.hakuya.ai/concepts/scopes).
 
 ## Memory Systems
 

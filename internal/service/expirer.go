@@ -15,11 +15,17 @@ type ExpirerService struct {
 	memoryStore domain.MemoryStore
 	policyStore domain.PolicyStore
 	feedbackStore domain.FeedbackStore
+	sessionStore domain.SessionStore
 	logger      *zap.Logger
 
 	interval time.Duration
 	stopCh   chan struct{}
 	wg       sync.WaitGroup
+}
+
+// SetSessionStore enables the session-memory expiry sweep (optional).
+func (s *ExpirerService) SetSessionStore(ss domain.SessionStore) {
+	s.sessionStore = ss
 }
 
 func NewExpirerService(ms domain.MemoryStore, ps domain.PolicyStore, fs domain.FeedbackStore, logger *zap.Logger) *ExpirerService {
@@ -68,6 +74,22 @@ func (s *ExpirerService) Stop() {
 }
 
 func (s *ExpirerService) run(ctx context.Context) {
+	swept, err := s.memoryStore.ArchiveExpiredSessionMemories(ctx)
+	if err != nil {
+		s.logger.Error("failed to archive expired session memories", zap.Error(err))
+	} else if swept > 0 {
+		s.logger.Info("archived expired session memories", zap.Int64("count", swept))
+	}
+	if s.sessionStore != nil {
+		if ids, err := s.sessionStore.ListExpired(ctx, 500); err == nil {
+			for _, id := range ids {
+				if err := s.sessionStore.MarkExpired(ctx, id); err != nil {
+					s.logger.Warn("failed to mark session expired", zap.Error(err))
+				}
+			}
+		}
+	}
+
 	// 1. Delete memories past their explicit expires_at timestamp
 	deleted, err := s.memoryStore.DeleteExpired(ctx)
 	if err != nil {

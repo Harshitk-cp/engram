@@ -2,22 +2,26 @@ package handlers
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/Harshitk-cp/engram/internal/api/middleware"
 	"github.com/Harshitk-cp/engram/internal/domain"
 	"github.com/Harshitk-cp/engram/internal/service"
+	"github.com/Harshitk-cp/engram/internal/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
 
 type ConversationHandler struct {
-	svc *service.ConversationService
+	svc      *service.ConversationService
+	anchors  *store.EntityStore
+	sessions *store.SessionStore
 }
 
-func NewConversationHandler(svc *service.ConversationService) *ConversationHandler {
-	return &ConversationHandler{svc: svc}
+func NewConversationHandler(svc *service.ConversationService, anchors *store.EntityStore, sessions *store.SessionStore) *ConversationHandler {
+	return &ConversationHandler{svc: svc, anchors: anchors, sessions: sessions}
 }
 
 type ingestRequest struct {
@@ -25,6 +29,10 @@ type ingestRequest struct {
 	EventDate string `json:"event_date,omitempty"`
 	Metadata map[string]any `json:"metadata,omitempty"`
 	Sync bool `json:"sync"`
+	// Bind extracted traces to a subject and/or a conversation.
+	AnchorID         string `json:"anchor_id,omitempty"`
+	AnchorExternalID string `json:"anchor_external_id,omitempty"`
+	SessionID        string `json:"session_id,omitempty"`
 }
 
 type ingestResponse struct {
@@ -89,6 +97,12 @@ func (h *ConversationHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	anchorID, sessionID, err := h.resolveBindings(r, tenant.ID, req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	domainReq := &domain.ConversationIngestRequest{
 		AgentID:   agentID,
 		TenantID:  tenant.ID,
@@ -96,6 +110,8 @@ func (h *ConversationHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 		EventDate: eventDate,
 		Metadata:  req.Metadata,
 		Sync:      req.Sync,
+		AnchorID:  anchorID,
+		SessionID: sessionID,
 	}
 
 	result, err := h.svc.Ingest(r.Context(), domainReq)
@@ -109,4 +125,42 @@ func (h *ConversationHandler) Ingest(w http.ResponseWriter, r *http.Request) {
 		Skipped:    result.Skipped,
 		DurationMs: result.Duration,
 	})
+}
+
+func (h *ConversationHandler) resolveBindings(r *http.Request, tenantID uuid.UUID, req ingestRequest) (anchorID, sessionID *uuid.UUID, err error) {
+	if req.SessionID != "" {
+		sid, perr := uuid.Parse(req.SessionID)
+		if perr != nil {
+			return nil, nil, errors.New("invalid session_id")
+		}
+		sess, gerr := h.sessions.GetByID(r.Context(), sid, tenantID)
+		if gerr != nil {
+			return nil, nil, errors.New("session not found")
+		}
+		sessionID = &sess.ID
+		anchorID = sess.AnchorID
+	}
+	switch {
+	case req.AnchorID != "":
+		id, perr := uuid.Parse(req.AnchorID)
+		if perr != nil {
+			return nil, nil, errors.New("invalid anchor_id")
+		}
+		if _, gerr := h.anchors.GetAnchor(r.Context(), id, tenantID); gerr != nil {
+			return nil, nil, errors.New("anchor not found")
+		}
+		anchorID = &id
+	case req.AnchorExternalID != "":
+		a, ferr := h.anchors.FindAnchorByExternalID(r.Context(), tenantID, req.AnchorExternalID)
+		if ferr == nil {
+			anchorID = &a.ID
+			break
+		}
+		anchor := &domain.Entity{TenantID: tenantID, Name: req.AnchorExternalID, ExternalID: req.AnchorExternalID}
+		if cerr := h.anchors.CreateAnchor(r.Context(), anchor, nil); cerr != nil {
+			return nil, nil, errors.New("failed to resolve or create anchor")
+		}
+		anchorID = &anchor.ID
+	}
+	return anchorID, sessionID, nil
 }

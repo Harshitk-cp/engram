@@ -49,6 +49,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	assocStore := store.NewMemoryAssociationStore(db)
 	graphStore := store.NewGraphStore(db)
 	entityStore := store.NewEntityStore(db)
+	sessionStore := store.NewSessionStore(db)
 	mutationLogStore := store.NewMutationLogStore(db)
 	episodeMemUsageStore := store.NewEpisodeMemoryUsageStore(db)
 	learningStatsStore := store.NewLearningStatsStore(db)
@@ -84,6 +85,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	feedbackSvc := service.NewFeedbackService(feedbackStore, memoryStore, agentStore)
 	tunerSvc := service.NewTunerService(feedbackStore, policyStore, logger)
 	expirerSvc := service.NewExpirerService(memoryStore, policyStore, feedbackStore, logger)
+	expirerSvc.SetSessionStore(sessionStore)
 	confidenceSvc := service.NewConfidenceService(memoryStore, logger)
 	episodeSvc := service.NewEpisodeService(episodeStore, agentStore, embeddingClient, llmClient, logger)
 	proceduralSvc := service.NewProceduralService(procedureStore, episodeStore, agentStore, embeddingClient, llmClient, logger)
@@ -97,6 +99,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 
 	// Graph services
 	hybridRecallSvc := service.NewHybridRecallService(memoryStore, graphStore, entityStore, embeddingClient, llmClient)
+	hybridRecallSvc.SetSessionStore(sessionStore)
 	graphBuilderSvc := service.NewGraphBuilderService(memoryStore, graphStore, entityStore, embeddingClient, llmClient)
 
 	// Learning services
@@ -124,7 +127,10 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	tenantHandler := handlers.NewTenantHandler(tenantStore, apiKeyStore)
 	setupHandler := handlers.NewSetupHandler(tenantStore, apiKeyStore, config.SetupToken())
 	agentHandler := handlers.NewAgentHandler(agentSvc)
-	memoryHandler := handlers.NewMemoryHandler(memorySvc, hybridRecallSvc)
+	memoryHandler := handlers.NewMemoryHandler(memorySvc, hybridRecallSvc, entityStore, sessionStore)
+	anchorHandler := handlers.NewAnchorHandler(entityStore, memoryStore)
+	sessionHandler := handlers.NewSessionHandler(sessionStore, entityStore, 0)
+	canonHandler := handlers.NewCanonHandler(memorySvc, memoryStore)
 	policyHandler := handlers.NewPolicyHandler(policySvc)
 	feedbackHandler := handlers.NewFeedbackHandler(feedbackSvc)
 	episodeHandler := handlers.NewEpisodeHandler(episodeSvc)
@@ -139,7 +145,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	graphHandler := handlers.NewGraphHandler(hybridRecallSvc, graphBuilderSvc, graphStore, entityStore)
 	learningHandler := handlers.NewLearningHandler(learningSvc, implicitFeedbackSvc, mutationLogStore)
 	conversationSvc := service.NewConversationService(memorySvc, llmClient, logger)
-	conversationHandler := handlers.NewConversationHandler(conversationSvc)
+	conversationHandler := handlers.NewConversationHandler(conversationSvc, entityStore, sessionStore)
 
 	r := chi.NewRouter()
 
@@ -214,6 +220,37 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 			r.Delete("/{id}", memoryHandler.Delete)
 			r.Post("/{id}/restore", memoryHandler.Restore)
 			r.Get("/{id}/mutations", learningHandler.GetMutationHistory)
+		})
+
+		// Anchors (who/what memories are about)
+		r.Route("/anchors", func(r chi.Router) {
+			r.Get("/", anchorHandler.List)
+			r.Post("/", anchorHandler.Create)
+			r.Route("/{id}", func(r chi.Router) {
+				r.Get("/", anchorHandler.GetByID)
+				r.Delete("/", anchorHandler.Delete)
+				r.Get("/memories", anchorHandler.ListMemories)
+			})
+		})
+
+		// Sessions
+		r.Route("/sessions", func(r chi.Router) {
+			r.Post("/", sessionHandler.Create)
+			r.Route("/{id}", func(r chi.Router) {
+				r.Get("/", sessionHandler.GetByID)
+				r.Post("/end", sessionHandler.End)
+			})
+		})
+
+		// Canon (tenant-shared, authoritative knowledge). Reads open to any
+		// authenticated caller; writes are admin-scoped.
+		r.Route("/canon", func(r chi.Router) {
+			r.Get("/", canonHandler.List)
+			r.Group(func(r chi.Router) {
+				r.Use(mw.RequireScope("admin"))
+				r.Post("/", canonHandler.Create)
+				r.Delete("/{id}", canonHandler.Delete)
+			})
 		})
 
 		// Learning
