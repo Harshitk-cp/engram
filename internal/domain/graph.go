@@ -93,13 +93,16 @@ func ValidEntityType(e string) bool {
 type Entity struct {
 	ID         uuid.UUID      `json:"id"`
 	AgentID    uuid.UUID      `json:"agent_id"`
+	TenantID   uuid.UUID      `json:"tenant_id,omitempty"`
 	Name       string         `json:"name"`
 	EntityType EntityType     `json:"entity_type"`
 	Aliases    []string       `json:"aliases,omitempty"`
 	Embedding  []float32      `json:"embedding,omitempty"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
-	CreatedAt  time.Time      `json:"created_at"`
-	UpdatedAt  time.Time      `json:"updated_at"`
+	IsAnchor   bool      `json:"is_anchor,omitempty"`
+	ExternalID string    `json:"external_id,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 type MentionType string
@@ -227,6 +230,12 @@ type HybridRecallRequest struct {
 	Mode          RecallMode `json:"mode,omitempty"`
 	MinSimilarity float32    `json:"min_similarity,omitempty"`
 	MaxResults    int        `json:"max_results,omitempty"`
+	// AnchorID restricts recall to traces about this anchor (who/what the
+	// memory is about). When set, AgentID may be uuid.Nil for a cross-agent
+	// anchor lookup ("everything known about this guest").
+	AnchorID *uuid.UUID `json:"anchor_id,omitempty"`
+	// SessionID folds this session's short-term traces into the composed recall.
+	SessionID *uuid.UUID `json:"session_id,omitempty"`
 }
 
 type ScoredMemory struct {

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"github.com/Harshitk-cp/engram/internal/api/middleware"
 	"github.com/Harshitk-cp/engram/internal/domain"
 	"github.com/Harshitk-cp/engram/internal/service"
+	"github.com/Harshitk-cp/engram/internal/store"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -18,10 +20,12 @@ import (
 type MemoryHandler struct {
 	svc       *service.MemoryService
 	hybridSvc *service.HybridRecallService
+	anchors   *store.EntityStore
+	sessions  *store.SessionStore
 }
 
-func NewMemoryHandler(svc *service.MemoryService, hybridSvc *service.HybridRecallService) *MemoryHandler {
-	return &MemoryHandler{svc: svc, hybridSvc: hybridSvc}
+func NewMemoryHandler(svc *service.MemoryService, hybridSvc *service.HybridRecallService, anchors *store.EntityStore, sessions *store.SessionStore) *MemoryHandler {
+	return &MemoryHandler{svc: svc, hybridSvc: hybridSvc, anchors: anchors, sessions: sessions}
 }
 
 type createMemoryRequest struct {
@@ -32,6 +36,12 @@ type createMemoryRequest struct {
 	Confidence float32        `json:"confidence,omitempty"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
 	EventDate string `json:"event_date,omitempty"`
+	// AnchorID / AnchorExternalID bind this trace to who/what it is about.
+	// Provide at most one; AnchorExternalID is resolved to (or creates) an anchor.
+	AnchorID         string `json:"anchor_id,omitempty"`
+	AnchorExternalID string `json:"anchor_external_id,omitempty"`
+	// SessionID binds this trace to a conversation (short-term, binding='session').
+	SessionID string `json:"session_id,omitempty"`
 }
 
 type createMemoryResponse struct {
@@ -66,9 +76,37 @@ func (h *MemoryHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	anchorID, err := h.resolveAnchor(r.Context(), tenant.ID, req.AnchorID, req.AnchorExternalID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// A session implies short-term binding; it may also carry the anchor it's
+	// about, so a session trace can later be promoted to that anchor.
+	var sessionID *uuid.UUID
+	if req.SessionID != "" {
+		sid, err := uuid.Parse(req.SessionID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid session_id")
+			return
+		}
+		sess, err := h.sessions.GetByID(r.Context(), sid, tenant.ID)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "session not found")
+			return
+		}
+		sessionID = &sess.ID
+		if anchorID == nil {
+			anchorID = sess.AnchorID
+		}
+	}
+
 	memory := &domain.Memory{
 		AgentID:    agentID,
 		TenantID:   tenant.ID,
+		AnchorID:   anchorID,
+		SessionID:  sessionID,
 		Type:       domain.MemoryType(req.Type),
 		Content:    req.Content,
 		Source:     req.Source,
@@ -108,6 +146,40 @@ func (h *MemoryHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+func (h *MemoryHandler) resolveAnchor(ctx context.Context, tenantID uuid.UUID, anchorID, externalID string) (*uuid.UUID, error) {
+	switch {
+	case anchorID != "":
+		id, err := uuid.Parse(anchorID)
+		if err != nil {
+			return nil, errors.New("invalid anchor_id")
+		}
+		if h.anchors == nil {
+			return nil, errors.New("anchors not configured")
+		}
+		if _, err := h.anchors.GetAnchor(ctx, id, tenantID); err != nil {
+			return nil, errors.New("anchor not found")
+		}
+		return &id, nil
+	case externalID != "":
+		if h.anchors == nil {
+			return nil, errors.New("anchors not configured")
+		}
+		a, err := h.anchors.FindAnchorByExternalID(ctx, tenantID, externalID)
+		if err == nil {
+			return &a.ID, nil
+		}
+		// Auto-create the anchor on first reference so callers don't have to
+		// pre-register every subject before writing about them.
+		anchor := &domain.Entity{TenantID: tenantID, Name: externalID, ExternalID: externalID}
+		if err := h.anchors.CreateAnchor(ctx, anchor, nil); err != nil {
+			return nil, errors.New("failed to resolve or create anchor")
+		}
+		return &anchor.ID, nil
+	default:
+		return nil, nil
+	}
 }
 
 func (h *MemoryHandler) GetByID(w http.ResponseWriter, r *http.Request) {
@@ -232,10 +304,31 @@ func (h *MemoryHandler) Recall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agentIDStr := r.URL.Query().Get("agent_id")
-	agentID, err := uuid.Parse(agentIDStr)
+	anchorID, err := h.resolveAnchor(r.Context(), tenant.ID, r.URL.Query().Get("anchor_id"), r.URL.Query().Get("anchor_external_id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid or missing agent_id parameter")
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	var sessionID *uuid.UUID
+	if sidStr := r.URL.Query().Get("session_id"); sidStr != "" {
+		sid, err := uuid.Parse(sidStr)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid session_id parameter")
+			return
+		}
+		sessionID = &sid
+	}
+
+	var agentID uuid.UUID
+	if agentIDStr := r.URL.Query().Get("agent_id"); agentIDStr != "" {
+		agentID, err = uuid.Parse(agentIDStr)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid agent_id parameter")
+			return
+		}
+	} else if anchorID == nil && sessionID == nil {
+		writeError(w, http.StatusBadRequest, "agent_id is required unless anchor_id/anchor_external_id or session_id is provided")
 		return
 	}
 
@@ -243,6 +336,8 @@ func (h *MemoryHandler) Recall(w http.ResponseWriter, r *http.Request) {
 	req := domain.HybridRecallRequest{
 		Query:        query,
 		AgentID:      agentID,
+		AnchorID:     anchorID,
+		SessionID:    sessionID,
 		TenantID:     tenant.ID,
 		TopK:         10,
 		VectorWeight: 0.6,

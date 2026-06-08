@@ -46,6 +46,14 @@ func (m *mockMemoryStore) Delete(ctx context.Context, id uuid.UUID, tenantID uui
 	return nil
 }
 
+func (m *mockMemoryStore) RecallExhaustive(ctx context.Context, queryEmbedding []float32, agentID uuid.UUID, tenantID uuid.UUID, opts domain.RecallOpts) ([]domain.MemoryWithScore, error) {
+	return nil, nil
+}
+
+func (m *mockMemoryStore) RecallHybrid(ctx context.Context, query string, queryEmbedding []float32, agentID uuid.UUID, tenantID uuid.UUID, opts domain.RecallOpts) ([]domain.MemoryWithScore, error) {
+	return nil, nil
+}
+
 func (m *mockMemoryStore) Recall(ctx context.Context, emb []float32, agentID uuid.UUID, tenantID uuid.UUID, opts domain.RecallOpts) ([]domain.MemoryWithScore, error) {
 	var results []domain.MemoryWithScore
 	for _, mem := range m.memories {
@@ -219,6 +227,14 @@ func (m *mockMemoryStore) SetNeedsReview(ctx context.Context, id uuid.UUID, need
 	return nil
 }
 
+func (m *mockMemoryStore) ArchiveExpiredSessionMemories(ctx context.Context) (int64, error) {
+	return 0, nil
+}
+
+func (m *mockMemoryStore) PromoteSessionToAnchor(ctx context.Context, id uuid.UUID) (bool, error) {
+	return false, nil
+}
+
 func (m *mockMemoryStore) GetNeedsReview(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, limit int) ([]domain.Memory, error) {
 	return []domain.Memory{}, nil
 }
@@ -256,6 +272,10 @@ func (m *mockLLMClient) Classify(ctx context.Context, content string) (domain.Me
 
 func (m *mockLLMClient) Extract(ctx context.Context, conversation []domain.Message) ([]domain.ExtractedMemory, error) {
 	return m.extractResult, nil
+}
+
+func (m *mockLLMClient) IngestConversation(ctx context.Context, messages []domain.Message) ([]domain.ExtractedConversationMemory, error) {
+	return nil, nil
 }
 
 func (m *mockLLMClient) Summarize(ctx context.Context, memories []domain.Memory) (string, error) {

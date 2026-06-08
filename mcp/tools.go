@@ -43,6 +43,14 @@ func rememberTool() Tool {
 					"type":        "string",
 					"description": "Agent ID to store the memory for. Uses the default agent if omitted.",
 				},
+				"anchor": map[string]interface{}{
+					"type":        "string",
+					"description": "Who/what this memory is about — the caller's own id for a subject (e.g. a customer/guest/patient id). Binds the trace to that anchor so it can be recalled per-subject. Auto-created on first use. Omit for the agent's own general memory.",
+				},
+				"session_id": map[string]interface{}{
+					"type":        "string",
+					"description": "Bind this memory to a conversation/session (UUID from POST /v1/sessions). Short-term: it decays after the session ends, and is promoted to the anchor's durable profile if it recurs.",
+				},
 				"confidence": map[string]interface{}{
 					"type": "number",
 					"description": "How certain this memory is (0.0–1.0). " +
@@ -81,6 +89,14 @@ func recallTool() Tool {
 					"type":        "string",
 					"description": "Agent ID to recall from. Uses the default agent if omitted.",
 				},
+				"anchor": map[string]interface{}{
+					"type":        "string",
+					"description": "Restrict recall to memories about this subject — the caller's own id for an anchor (e.g. a customer/guest/patient id). Omit to recall the agent's own general memory.",
+				},
+				"session_id": map[string]interface{}{
+					"type":        "string",
+					"description": "Fold a session's short-term memory into recall (UUID). Composes the subject's durable profile + this conversation's recent context.",
+				},
 			},
 			"required": []string{"query"},
 		},
@@ -113,6 +129,14 @@ func recallGraphTool() Tool {
 				"agent_id": map[string]interface{}{
 					"type":        "string",
 					"description": "Agent ID to recall from. Uses the default agent if omitted.",
+				},
+				"anchor": map[string]interface{}{
+					"type":        "string",
+					"description": "Restrict recall to memories about this subject — the caller's own id for an anchor (e.g. a customer/guest/patient id). Omit to recall the agent's own general memory.",
+				},
+				"session_id": map[string]interface{}{
+					"type":        "string",
+					"description": "Fold a session's short-term memory into recall (UUID). Composes the subject's durable profile + this conversation's recent context.",
 				},
 			},
 			"required": []string{"query"},
@@ -184,10 +208,12 @@ func rememberHandler(client *Client) ToolHandler {
 			source = "agent"
 		}
 		agentID, _ := args["agent_id"].(string)
+		anchor, _ := args["anchor"].(string)
+		session, _ := args["session_id"].(string)
 
 		confidence := floatArg(args, "confidence", 0)
 
-		result, err := client.Remember(ctx, agentID, content, memType, source, float32(confidence))
+		result, err := client.Remember(ctx, agentID, content, memType, source, anchor, session, float32(confidence))
 		if err != nil {
 			return ErrorResult(err.Error()), nil
 		}
@@ -209,8 +235,10 @@ func recallHandler(client *Client) ToolHandler {
 		}
 		topK := intArg(args, "top_k", 10)
 		agentID, _ := args["agent_id"].(string)
+		anchor, _ := args["anchor"].(string)
+		session, _ := args["session_id"].(string)
 
-		memories, err := client.Recall(ctx, agentID, query, topK, 0)
+		memories, err := client.Recall(ctx, agentID, query, topK, 0, anchor, session)
 		if err != nil {
 			return ErrorResult(err.Error()), nil
 		}
@@ -227,8 +255,10 @@ func recallGraphHandler(client *Client) ToolHandler {
 		topK := intArg(args, "top_k", 10)
 		graphWeight := floatArg(args, "graph_weight", 0.4)
 		agentID, _ := args["agent_id"].(string)
+		anchor, _ := args["anchor"].(string)
+		session, _ := args["session_id"].(string)
 
-		memories, err := client.Recall(ctx, agentID, query, topK, graphWeight)
+		memories, err := client.Recall(ctx, agentID, query, topK, graphWeight, anchor, session)
 		if err != nil {
 			return ErrorResult(err.Error()), nil
 		}

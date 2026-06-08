@@ -41,10 +41,7 @@ func (s *MemoryStore) Create(ctx context.Context, m *domain.Memory) error {
 		m.ReinforcementCount = 1
 	}
 
-	// Default decay rate
-	if m.DecayRate == 0 {
-		m.DecayRate = 0.05
-	}
+	// Decay rate is defaulted per-binding below (after binding is computed).
 
 	// Default provenance
 	if m.Provenance == "" {
@@ -56,21 +53,32 @@ func (s *MemoryStore) Create(ctx context.Context, m *domain.Memory) error {
 		m.Confidence = m.Provenance.InitialConfidence()
 	}
 
+	// Binding is computed server-side from the ids present — never trusted from
+	// the client — and pinned to them by a DB CHECK constraint. (Canon is set
+	// explicitly by the caller.)
+	if m.Binding == "" {
+		m.Binding = domain.ComputeMemoryBinding(m.AnchorID, m.SessionID)
+	}
+
+	if m.DecayRate == 0 {
+		m.DecayRate = domain.DefaultDecayRate(m.Binding)
+	}
+
 	return s.db.QueryRow(ctx,
-		`INSERT INTO memories (agent_id, tenant_id, type, content, embedding, embedding_provider, embedding_model, source, provenance, confidence, metadata, event_date, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $14, NOW(), $12, $13, NOW(), 0)
+		`INSERT INTO memories (agent_id, tenant_id, type, content, embedding, embedding_provider, embedding_model, source, provenance, confidence, metadata, event_date, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, binding, anchor_id, session_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $14, NOW(), $12, $13, NOW(), 0, $15, $16, $17)
 		 RETURNING id, created_at, updated_at, last_verified_at, last_accessed_at`,
-		m.AgentID, m.TenantID, m.Type, m.Content, embedding, m.EmbeddingProvider, m.EmbeddingModel, m.Source, m.Provenance, m.Confidence, m.Metadata, m.ReinforcementCount, m.DecayRate, m.EventDate,
+		m.AgentID, m.TenantID, m.Type, m.Content, embedding, m.EmbeddingProvider, m.EmbeddingModel, m.Source, m.Provenance, m.Confidence, m.Metadata, m.ReinforcementCount, m.DecayRate, m.EventDate, m.Binding, m.AnchorID, m.SessionID,
 	).Scan(&m.ID, &m.CreatedAt, &m.UpdatedAt, &m.LastVerifiedAt, &m.LastAccessedAt)
 }
 
 func (s *MemoryStore) GetByID(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) (*domain.Memory, error) {
 	m := &domain.Memory{}
 	err := s.db.QueryRow(ctx,
-		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, expires_at, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at
+		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, expires_at, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at, binding, anchor_id, session_id
 		 FROM memories WHERE id = $1 AND tenant_id = $2 AND is_archived = FALSE`,
 		id, tenantID,
-	).Scan(&m.ID, &m.AgentID, &m.TenantID, &m.Type, &m.Content, &m.EmbeddingProvider, &m.EmbeddingModel, &m.Source, &m.Provenance, &m.Confidence, &m.Metadata, &m.ExpiresAt, &m.LastVerifiedAt, &m.ReinforcementCount, &m.DecayRate, &m.LastAccessedAt, &m.AccessCount, &m.CreatedAt, &m.UpdatedAt)
+	).Scan(&m.ID, &m.AgentID, &m.TenantID, &m.Type, &m.Content, &m.EmbeddingProvider, &m.EmbeddingModel, &m.Source, &m.Provenance, &m.Confidence, &m.Metadata, &m.ExpiresAt, &m.LastVerifiedAt, &m.ReinforcementCount, &m.DecayRate, &m.LastAccessedAt, &m.AccessCount, &m.CreatedAt, &m.UpdatedAt, &m.Binding, &m.AnchorID, &m.SessionID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
@@ -110,6 +118,119 @@ func (s *MemoryStore) Delete(ctx context.Context, id uuid.UUID, tenantID uuid.UU
 	return nil
 }
 
+func (s *MemoryStore) ListByAnchor(ctx context.Context, anchorID, tenantID uuid.UUID, limit int) ([]domain.Memory, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.Query(ctx,
+		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, expires_at, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at, binding, anchor_id, session_id
+		 FROM memories
+		 WHERE anchor_id = $1 AND tenant_id = $2 AND is_archived = FALSE
+		 ORDER BY confidence DESC, created_at DESC
+		 LIMIT $3`,
+		anchorID, tenantID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var memories []domain.Memory
+	for rows.Next() {
+		var m domain.Memory
+		if err := rows.Scan(&m.ID, &m.AgentID, &m.TenantID, &m.Type, &m.Content, &m.EmbeddingProvider, &m.EmbeddingModel, &m.Source, &m.Provenance, &m.Confidence, &m.Metadata, &m.ExpiresAt, &m.LastVerifiedAt, &m.ReinforcementCount, &m.DecayRate, &m.LastAccessedAt, &m.AccessCount, &m.CreatedAt, &m.UpdatedAt, &m.Binding, &m.AnchorID, &m.SessionID); err != nil {
+			return nil, err
+		}
+		memories = append(memories, m)
+	}
+	return memories, rows.Err()
+}
+
+func (s *MemoryStore) PurgeByAnchor(ctx context.Context, anchorID, tenantID uuid.UUID) (int64, error) {
+	tag, err := s.db.Exec(ctx,
+		`DELETE FROM memories WHERE anchor_id = $1 AND tenant_id = $2`,
+		anchorID, tenantID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+func (s *MemoryStore) ListCanon(ctx context.Context, tenantID uuid.UUID, limit int) ([]domain.Memory, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.Query(ctx,
+		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, expires_at, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at, binding, anchor_id, session_id
+		 FROM memories
+		 WHERE tenant_id = $1 AND binding = 'canon' AND is_archived = FALSE
+		 ORDER BY confidence DESC, created_at DESC
+		 LIMIT $2`,
+		tenantID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var memories []domain.Memory
+	for rows.Next() {
+		var m domain.Memory
+		if err := rows.Scan(&m.ID, &m.AgentID, &m.TenantID, &m.Type, &m.Content, &m.EmbeddingProvider, &m.EmbeddingModel, &m.Source, &m.Provenance, &m.Confidence, &m.Metadata, &m.ExpiresAt, &m.LastVerifiedAt, &m.ReinforcementCount, &m.DecayRate, &m.LastAccessedAt, &m.AccessCount, &m.CreatedAt, &m.UpdatedAt, &m.Binding, &m.AnchorID, &m.SessionID); err != nil {
+			return nil, err
+		}
+		memories = append(memories, m)
+	}
+	return memories, rows.Err()
+}
+
+func (s *MemoryStore) FindCanonByContent(ctx context.Context, tenantID uuid.UUID, content string) (*domain.Memory, error) {
+	var m domain.Memory
+	err := s.db.QueryRow(ctx,
+		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, expires_at, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at, binding, anchor_id, session_id
+		 FROM memories
+		 WHERE tenant_id = $1 AND binding = 'canon' AND is_archived = FALSE AND content = $2
+		 ORDER BY created_at ASC
+		 LIMIT 1`,
+		tenantID, content,
+	).Scan(&m.ID, &m.AgentID, &m.TenantID, &m.Type, &m.Content, &m.EmbeddingProvider, &m.EmbeddingModel, &m.Source, &m.Provenance, &m.Confidence, &m.Metadata, &m.ExpiresAt, &m.LastVerifiedAt, &m.ReinforcementCount, &m.DecayRate, &m.LastAccessedAt, &m.AccessCount, &m.CreatedAt, &m.UpdatedAt, &m.Binding, &m.AnchorID, &m.SessionID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &m, nil
+}
+
+func (s *MemoryStore) ArchiveExpiredSessionMemories(ctx context.Context) (int64, error) {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE memories SET is_archived = TRUE, archived_at = NOW(), updated_at = NOW()
+		 WHERE binding = 'session' AND is_archived = FALSE
+		   AND session_id IN (
+		     SELECT id FROM sessions WHERE expires_at IS NOT NULL AND expires_at < NOW()
+		   )`,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+func (s *MemoryStore) PromoteSessionToAnchor(ctx context.Context, id uuid.UUID) (bool, error) {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE memories SET binding = 'anchored', session_id = NULL,
+		        decay_rate = $2, updated_at = NOW()
+		 WHERE id = $1 AND binding = 'session' AND anchor_id IS NOT NULL`,
+		id, domain.DefaultDecayRate(domain.BindingAnchored),
+	)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
 func (s *MemoryStore) Recall(ctx context.Context, embedding []float32, agentID uuid.UUID, tenantID uuid.UUID, opts domain.RecallOpts) ([]domain.MemoryWithScore, error) {
 	if opts.TopK <= 0 {
 		opts.TopK = 10
@@ -120,11 +241,37 @@ func (s *MemoryStore) Recall(ctx context.Context, embedding []float32, agentID u
 	var conditions []string
 	var args []any
 
-	conditions = append(conditions, fmt.Sprintf("agent_id = $%d", len(args)+1))
-	args = append(args, agentID)
+	// agent_id is optional: when recalling by anchor across all of a tenant's
+	if agentID != uuid.Nil {
+		conditions = append(conditions, fmt.Sprintf("agent_id = $%d", len(args)+1))
+		args = append(args, agentID)
+	}
 
 	conditions = append(conditions, fmt.Sprintf("tenant_id = $%d", len(args)+1))
 	args = append(args, tenantID)
+
+	if opts.Binding != nil {
+		conditions = append(conditions, fmt.Sprintf("binding = $%d::memory_binding", len(args)+1))
+		args = append(args, string(*opts.Binding))
+		switch *opts.Binding {
+		case domain.BindingAnchored:
+			if opts.AnchorID != nil {
+				conditions = append(conditions, fmt.Sprintf("anchor_id = $%d", len(args)+1))
+				args = append(args, *opts.AnchorID)
+			}
+		case domain.BindingSession:
+			if opts.SessionID != nil {
+				conditions = append(conditions, fmt.Sprintf("session_id = $%d", len(args)+1))
+				args = append(args, *opts.SessionID)
+			}
+		}
+	} else if opts.AnchorID != nil {
+		conditions = append(conditions, fmt.Sprintf("anchor_id = $%d", len(args)+1))
+		args = append(args, *opts.AnchorID)
+	} else {
+		conditions = append(conditions, "anchor_id IS NULL")
+		conditions = append(conditions, "session_id IS NULL")
+	}
 
 	conditions = append(conditions, "embedding IS NOT NULL")
 	conditions = append(conditions, "is_archived = FALSE")
@@ -164,7 +311,7 @@ func (s *MemoryStore) Recall(ctx context.Context, embedding []float32, agentID u
 			`WITH ranked AS (
 			   SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model,
 			          source, provenance, confidence, metadata, event_date, last_verified_at, reinforcement_count,
-			          decay_rate, last_accessed_at, access_count, created_at, updated_at,
+			          decay_rate, last_accessed_at, access_count, created_at, updated_at, binding, anchor_id, session_id,
 			          (embedding <=> $%d) AS vec_dist,
 			          COALESCE(
 			            EXTRACT(EPOCH FROM (COALESCE(event_date, created_at)
@@ -180,7 +327,7 @@ func (s *MemoryStore) Recall(ctx context.Context, embedding []float32, agentID u
 			 )
 			 SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model,
 			        source, provenance, confidence, metadata, event_date, last_verified_at, reinforcement_count,
-			        decay_rate, last_accessed_at, access_count, created_at, updated_at,
+			        decay_rate, last_accessed_at, access_count, created_at, updated_at, binding, anchor_id, session_id,
 			        (1 - vec_dist) + $%d * relative_recency AS score
 			 FROM ranked
 			 ORDER BY vec_dist - $%d * relative_recency ASC
@@ -192,7 +339,7 @@ func (s *MemoryStore) Recall(ctx context.Context, embedding []float32, agentID u
 		)
 	} else {
 		query = fmt.Sprintf(
-			`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, event_date, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at,
+			`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, event_date, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at, binding, anchor_id, session_id,
 			        1 - (embedding <=> $%d) AS score
 			 FROM memories
 			 WHERE %s
@@ -219,6 +366,7 @@ func (s *MemoryStore) Recall(ctx context.Context, embedding []float32, agentID u
 			&ms.EmbeddingProvider, &ms.EmbeddingModel,
 			&ms.Source, &ms.Provenance, &ms.Confidence, &ms.Metadata, &ms.EventDate,
 			&ms.LastVerifiedAt, &ms.ReinforcementCount, &ms.DecayRate, &ms.LastAccessedAt, &ms.AccessCount, &ms.CreatedAt, &ms.UpdatedAt,
+			&ms.Binding, &ms.AnchorID, &ms.SessionID,
 			&ms.Score,
 		)
 		if err != nil {
@@ -248,17 +396,26 @@ func (s *MemoryStore) RecallExhaustive(ctx context.Context, queryEmbedding []flo
 	pageSize := 1000
 	offset := 0
 
+
+	anchorClause := "AND anchor_id IS NULL"
+	var anchorArg []any
+	if opts.AnchorID != nil {
+		anchorClause = "AND anchor_id = $5"
+		anchorArg = []any{*opts.AnchorID}
+	}
+
 	for {
+		queryArgs := append([]any{agentID, tenantID, pageSize, offset}, anchorArg...)
 		rows, err := s.db.Query(ctx,
-			`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model,
+			fmt.Sprintf(`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model,
 			        source, provenance, confidence, metadata, event_date, last_verified_at,
 			        reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at,
 			        embedding
 			 FROM memories
-			 WHERE agent_id = $1 AND tenant_id = $2 AND embedding IS NOT NULL AND is_archived = FALSE
+			 WHERE agent_id = $1 AND tenant_id = $2 AND embedding IS NOT NULL AND is_archived = FALSE %s
 			 ORDER BY created_at
-			 LIMIT $3 OFFSET $4`,
-			agentID, tenantID, pageSize, offset,
+			 LIMIT $3 OFFSET $4`, anchorClause),
+			queryArgs...,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("exhaustive recall page: %w", err)
@@ -321,8 +478,14 @@ func (s *MemoryStore) RecallHybrid(ctx context.Context, query string, queryEmbed
 	args = append(args, agentID, tenantID, query, vec, topK)
 
 	if opts.MemoryType != nil {
-		typeCondition = "AND type = $6"
 		args = append(args, string(*opts.MemoryType))
+		typeCondition = fmt.Sprintf("AND type = $%d", len(args))
+	}
+
+	anchorCondition := "AND anchor_id IS NULL"
+	if opts.AnchorID != nil {
+		args = append(args, *opts.AnchorID)
+		anchorCondition = fmt.Sprintf("AND anchor_id = $%d", len(args))
 	}
 
 	hybridQuery := fmt.Sprintf(`
@@ -332,14 +495,14 @@ func (s *MemoryStore) RecallHybrid(ctx context.Context, query string, queryEmbed
 		         ROW_NUMBER() OVER (ORDER BY ts_rank(content_tsv, plainto_tsquery('english', $3)) DESC) AS bm25_rank
 		  FROM memories
 		  WHERE agent_id = $1 AND tenant_id = $2 AND is_archived = FALSE
-		    AND content_tsv @@ plainto_tsquery('english', $3) %s
+		    AND content_tsv @@ plainto_tsquery('english', $3) %s %s
 		),
 		vec_ranked AS (
 		  SELECT id,
 		         1 - (embedding <=> $4) AS vec_score,
 		         ROW_NUMBER() OVER (ORDER BY embedding <=> $4 ASC) AS vec_rank
 		  FROM memories
-		  WHERE agent_id = $1 AND tenant_id = $2 AND embedding IS NOT NULL AND is_archived = FALSE %s
+		  WHERE agent_id = $1 AND tenant_id = $2 AND embedding IS NOT NULL AND is_archived = FALSE %s %s
 		  LIMIT 100
 		),
 		rrf AS (
@@ -357,7 +520,7 @@ func (s *MemoryStore) RecallHybrid(ctx context.Context, query string, queryEmbed
 		WHERE m.is_archived = FALSE
 		ORDER BY r.rrf_score DESC
 		LIMIT $5
-	`, typeCondition, typeCondition)
+	`, typeCondition, anchorCondition, typeCondition, anchorCondition)
 
 	rows, err := s.db.Query(ctx, hybridQuery, args...)
 	if err != nil {
@@ -461,7 +624,7 @@ func (s *MemoryStore) FindSimilar(ctx context.Context, agentID uuid.UUID, tenant
 	vec := pgvector.NewVector(embedding)
 
 	rows, err := s.db.Query(ctx,
-		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at,
+		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at, binding, anchor_id, session_id,
 		        embedding::text,
 		        1 - (embedding <=> $1) AS score
 		 FROM memories
@@ -482,6 +645,7 @@ func (s *MemoryStore) FindSimilar(ctx context.Context, agentID uuid.UUID, tenant
 			&ms.ID, &ms.AgentID, &ms.TenantID, &ms.Type, &ms.Content,
 			&ms.EmbeddingProvider, &ms.EmbeddingModel,
 			&ms.Source, &ms.Provenance, &ms.Confidence, &ms.Metadata, &ms.LastVerifiedAt, &ms.ReinforcementCount, &ms.DecayRate, &ms.LastAccessedAt, &ms.AccessCount, &ms.CreatedAt, &ms.UpdatedAt,
+			&ms.Binding, &ms.AnchorID, &ms.SessionID,
 			&embVec,
 			&ms.Score,
 		)
@@ -501,7 +665,7 @@ func (s *MemoryStore) FindSimilar(ctx context.Context, agentID uuid.UUID, tenant
 
 func (s *MemoryStore) GetRecentByType(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, memType domain.MemoryType, limit int) ([]domain.MemoryWithScore, error) {
 	rows, err := s.db.Query(ctx,
-		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at,
+		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at, binding, anchor_id, session_id,
 		        embedding::text,
 		        1.0::float4 AS score
 		 FROM memories
@@ -523,6 +687,7 @@ func (s *MemoryStore) GetRecentByType(ctx context.Context, agentID uuid.UUID, te
 			&ms.ID, &ms.AgentID, &ms.TenantID, &ms.Type, &ms.Content,
 			&ms.EmbeddingProvider, &ms.EmbeddingModel,
 			&ms.Source, &ms.Provenance, &ms.Confidence, &ms.Metadata, &ms.LastVerifiedAt, &ms.ReinforcementCount, &ms.DecayRate, &ms.LastAccessedAt, &ms.AccessCount, &ms.CreatedAt, &ms.UpdatedAt,
+			&ms.Binding, &ms.AnchorID, &ms.SessionID,
 			&embVec,
 			&ms.Score,
 		); err != nil {

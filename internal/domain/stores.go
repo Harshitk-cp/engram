@@ -62,6 +62,9 @@ type RecallOpts struct {
 	Mode RecallMode
 	MinSimilarity float32
 	MaxResults int
+	AnchorID *uuid.UUID
+	SessionID *uuid.UUID
+	Binding *MemoryBinding
 }
 
 type MemoryWithScore struct {
@@ -98,6 +101,9 @@ type MemoryStore interface {
 	// Review flag
 	SetNeedsReview(ctx context.Context, id uuid.UUID, needsReview bool) error
 	GetNeedsReview(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, limit int) ([]Memory, error)
+	// Binding lifecycle
+	ArchiveExpiredSessionMemories(ctx context.Context) (int64, error)
+	PromoteSessionToAnchor(ctx context.Context, id uuid.UUID) (bool, error)
 }
 
 type BeliefContradiction struct {

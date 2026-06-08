@@ -93,10 +93,47 @@ func ValidMemoryType(t string) bool {
 	return false
 }
 
+type MemoryBinding string
+
+const (
+	// BindingCanon: tenant-shared, authoritative knowledge (policies, catalog).
+	BindingCanon MemoryBinding = "canon"
+	// BindingPrivate: the forming agent's own memory. The default for
+	BindingPrivate MemoryBinding = "private"
+	// BindingAnchored: about a specific anchor (a customer/lead/patient/guest).
+	BindingAnchored MemoryBinding = "anchored"
+	// BindingSession: short-term, tied to one conversation.
+	BindingSession MemoryBinding = "session"
+)
+
+func DefaultDecayRate(b MemoryBinding) float32 {
+	switch b {
+	case BindingSession:
+		return 0.20
+	case BindingCanon:
+		return 0.01
+	default: // private, anchored
+		return 0.05
+	}
+}
+
+func ComputeMemoryBinding(anchorID, sessionID *uuid.UUID) MemoryBinding {
+	if sessionID != nil {
+		return BindingSession
+	}
+	if anchorID != nil {
+		return BindingAnchored
+	}
+	return BindingPrivate
+}
+
 type Memory struct {
 	ID                 uuid.UUID      `json:"id"`
 	AgentID            uuid.UUID      `json:"agent_id"`
 	TenantID           uuid.UUID      `json:"tenant_id,omitempty"`
+	Binding            MemoryBinding  `json:"binding,omitempty"`
+	AnchorID           *uuid.UUID     `json:"anchor_id,omitempty"`
+	SessionID          *uuid.UUID     `json:"session_id,omitempty"`
 	Type               MemoryType     `json:"type"`
 	Content            string         `json:"content"`
 	Embedding          []float32      `json:"-"`
@@ -128,6 +165,8 @@ type ConversationIngestRequest struct {
 	EventDate *time.Time     `json:"event_date,omitempty"`
 	Metadata  map[string]any `json:"metadata,omitempty"`
 	Sync 	  bool 		     `json:"sync"`
+	AnchorID  *uuid.UUID `json:"-"`
+	SessionID *uuid.UUID `json:"-"`
 }
 
 type IngestResult struct {

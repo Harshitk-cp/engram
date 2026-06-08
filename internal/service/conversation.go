@@ -73,6 +73,8 @@ func (s *ConversationService) Ingest(ctx context.Context, req *domain.Conversati
 			metadata[k] = v
 		}
 		userMemID := userMem.ID
+		anchorID := req.AnchorID
+		sessionID := req.SessionID
 
 		go func() {
 			bgCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -83,6 +85,8 @@ func (s *ConversationService) Ingest(ctx context.Context, req *domain.Conversati
 				Messages:  messages,
 				EventDate: eventDate,
 				Metadata:  metadata,
+				AnchorID:  anchorID,
+				SessionID: sessionID,
 			}
 			if _, err := s.runExtraction(bgCtx, asyncReq, userMemID); err != nil {
 				s.logger.Warn("async extraction failed",
@@ -175,6 +179,8 @@ func (s *ConversationService) storeExtractedFact(ctx context.Context, req *domai
 		Confidence: confidence,
 		EventDate:  req.EventDate,
 		Metadata:   metadata,
+		AnchorID:   req.AnchorID,
+		SessionID:  req.SessionID,
 	}
 
 	if _, err := s.memorySvc.Create(ctx, m); err != nil {
@@ -214,6 +220,8 @@ func (s *ConversationService) storeUserTurnsFallback(ctx context.Context, req *d
 		Confidence: domain.EvidenceExplicit.InitialConfidence(),
 		EventDate:  req.EventDate,
 		Metadata:   metadata,
+		AnchorID:   req.AnchorID,
+		SessionID:  req.SessionID,
 	}
 
 	if _, err := s.memorySvc.Create(ctx, m); err != nil {
@@ -250,6 +258,8 @@ func (s *ConversationService) storeEnumerationTurns(ctx context.Context, req *do
 			Confidence: domain.EvidenceExplicit.InitialConfidence(),
 			EventDate:  req.EventDate,
 			Metadata:   metadata,
+			AnchorID:   req.AnchorID,
+			SessionID:  req.SessionID,
 		}
 		if _, err := s.memorySvc.Create(ctx, m); err != nil {
 			s.logger.Warn("failed to store enumeration turn",
