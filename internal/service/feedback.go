@@ -21,6 +21,7 @@ type FeedbackService struct {
 	memoryStore      domain.MemoryStore
 	agentStore       domain.AgentStore
 	mutationLogStore domain.MutationLogStore
+	uow              *store.UnitOfWork
 	logger           *zap.Logger
 }
 
@@ -35,6 +36,10 @@ func NewFeedbackService(fs domain.FeedbackStore, ms domain.MemoryStore, as domai
 
 func (s *FeedbackService) SetMutationLogStore(mls domain.MutationLogStore) {
 	s.mutationLogStore = mls
+}
+
+func (s *FeedbackService) SetUnitOfWork(uow *store.UnitOfWork) {
+	s.uow = uow
 }
 
 func (s *FeedbackService) SetLogger(logger *zap.Logger) {
@@ -93,35 +98,51 @@ func (s *FeedbackService) applyFeedbackEffect(ctx context.Context, f *domain.Fee
 		newReinforcement = 0
 	}
 
-	// Update memory
-	if err := s.memoryStore.UpdateReinforcement(ctx, memory.ID, newConfidence, newReinforcement); err != nil {
-		s.logger.Warn("failed to update memory on feedback", zap.Error(err))
-		return
+	mutation := &domain.MutationLog{
+		MemoryID:              memory.ID,
+		AgentID:               f.AgentID,
+		TenantID:              &memory.TenantID,
+		MutationType:          domain.MutationFeedback,
+		SourceType:            domain.MutationSourceExplicit,
+		SourceID:              &f.ID,
+		OldConfidence:         &oldConfidence,
+		NewConfidence:         &newConfidence,
+		OldReinforcementCount: &oldReinforcement,
+		NewReinforcementCount: &newReinforcement,
+		Reason:                "feedback: " + string(f.SignalType),
 	}
 
-	// Handle review flag
-	if effect.TriggerReview {
-		if err := s.memoryStore.SetNeedsReview(ctx, memory.ID, true); err != nil {
-			s.logger.Warn("failed to set needs_review flag", zap.Error(err))
+	if s.uow != nil {
+		// Atomic path: memory update, review flag, and audit row commit together.
+		if err := s.uow.Do(ctx, func(st *store.TxStores) error {
+			if err := st.Memory.UpdateReinforcement(ctx, memory.ID, newConfidence, newReinforcement); err != nil {
+				return err
+			}
+			if effect.TriggerReview {
+				if err := st.Memory.SetNeedsReview(ctx, memory.ID, true); err != nil {
+					return err
+				}
+			}
+			return st.MutationLog.Create(ctx, mutation)
+		}); err != nil {
+			s.logger.Warn("failed to apply feedback effect", zap.Error(err))
+			return
 		}
-	}
-
-	// Log mutation
-	if s.mutationLogStore != nil {
-		mutation := &domain.MutationLog{
-			MemoryID:              memory.ID,
-			AgentID:               f.AgentID,
-			MutationType:          domain.MutationFeedback,
-			SourceType:            domain.MutationSourceExplicit,
-			SourceID:              &f.ID,
-			OldConfidence:         &oldConfidence,
-			NewConfidence:         &newConfidence,
-			OldReinforcementCount: &oldReinforcement,
-			NewReinforcementCount: &newReinforcement,
-			Reason:                "feedback: " + string(f.SignalType),
+	} else {
+		// Fallback (no unit of work, e.g. unit tests): non-atomic.
+		if err := s.memoryStore.UpdateReinforcement(ctx, memory.ID, newConfidence, newReinforcement); err != nil {
+			s.logger.Warn("failed to update memory on feedback", zap.Error(err))
+			return
 		}
-		if err := s.mutationLogStore.Create(ctx, mutation); err != nil {
-			s.logger.Warn("failed to log mutation", zap.Error(err))
+		if effect.TriggerReview {
+			if err := s.memoryStore.SetNeedsReview(ctx, memory.ID, true); err != nil {
+				s.logger.Warn("failed to set needs_review flag", zap.Error(err))
+			}
+		}
+		if s.mutationLogStore != nil {
+			if err := s.mutationLogStore.Create(ctx, mutation); err != nil {
+				s.logger.Warn("failed to log mutation", zap.Error(err))
+			}
 		}
 	}
 

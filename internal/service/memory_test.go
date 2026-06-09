@@ -126,6 +126,14 @@ func (m *mockMemoryStore) UpdateReinforcement(ctx context.Context, id uuid.UUID,
 	return nil
 }
 
+func (m *mockMemoryStore) UpdateContent(ctx context.Context, id uuid.UUID, content string, embedding []float32) error {
+	return nil
+}
+
+func (m *mockMemoryStore) RedactContent(ctx context.Context, id uuid.UUID, tombstone string) error {
+	return nil
+}
+
 func (m *mockMemoryStore) UpdateConfidence(ctx context.Context, id uuid.UUID, confidence float32) error {
 	mem, ok := m.memories[id]
 	if !ok {
@@ -233,6 +241,10 @@ func (m *mockMemoryStore) ArchiveExpiredSessionMemories(ctx context.Context) (in
 
 func (m *mockMemoryStore) PromoteSessionToAnchor(ctx context.Context, id uuid.UUID) (bool, error) {
 	return false, nil
+}
+
+func (m *mockMemoryStore) CountNeedsReview(ctx context.Context, agentID, tenantID uuid.UUID) (int, error) {
+	return 0, nil
 }
 
 func (m *mockMemoryStore) GetNeedsReview(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, limit int) ([]domain.Memory, error) {
@@ -652,4 +664,12 @@ func TestMemoryService_Summarize(t *testing.T) {
 	if summary == "" {
 		t.Fatal("expected non-empty summary")
 	}
+}
+
+func (m *mockMemoryStore) ListByAgentFiltered(ctx context.Context, agentID, tenantID uuid.UUID, f domain.MemoryFilter, limit, offset int) ([]domain.Memory, int, error) {
+	return nil, 0, nil
+}
+
+func (m *mockMemoryStore) BeliefsAsOf(ctx context.Context, agentID, tenantID uuid.UUID, at time.Time, limit int) ([]domain.BeliefAtTime, int, error) {
+	return nil, 0, nil
 }

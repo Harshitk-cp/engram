@@ -31,6 +31,7 @@ type AgentStore interface {
 	GetByID(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) (*Agent, error)
 	GetByExternalID(ctx context.Context, externalID string, tenantID uuid.UUID) (*Agent, error)
 	ListByTenantID(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]Agent, error)
+	CountByTenant(ctx context.Context, tenantID uuid.UUID) (int, error)
 	Delete(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error
 }
 
@@ -72,6 +73,25 @@ type MemoryWithScore struct {
 	Score float32 `json:"score"`
 }
 
+// BeliefAtTime is a memory with its confidence reconstructed as of a past instant
+// (transaction-time reconstruction for the bitemporal "time machine").
+type BeliefAtTime struct {
+	ID         uuid.UUID `json:"id"`
+	Content    string    `json:"content"`
+	Type       string    `json:"type"`
+	Confidence float32   `json:"confidence"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// MemoryFilter holds optional filters for listing an agent's memories. Empty
+// fields are ignored. Future filters add fields here without changing signatures.
+type MemoryFilter struct {
+	Tier       string // hot | warm | cold | archive | ""
+	Type       string // a memory_type or ""
+	Provenance string // user | agent | tool | derived | inferred | ""
+	Binding    string // private | anchored | session | canon | ""
+}
+
 type MemoryStore interface {
 	Create(ctx context.Context, m *Memory) error
 	GetByID(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) (*Memory, error)
@@ -88,6 +108,12 @@ type MemoryStore interface {
 	GetRecentByType(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, memType MemoryType, limit int) ([]MemoryWithScore, error)
 	UpdateReinforcement(ctx context.Context, id uuid.UUID, confidence float32, reinforcementCount int) error
 	UpdateConfidence(ctx context.Context, id uuid.UUID, confidence float32) error
+	// Admin correction methods
+	UpdateContent(ctx context.Context, id uuid.UUID, content string, embedding []float32) error
+	RedactContent(ctx context.Context, id uuid.UUID, tombstone string) error
+	CountNeedsReview(ctx context.Context, agentID, tenantID uuid.UUID) (int, error)
+	ListByAgentFiltered(ctx context.Context, agentID, tenantID uuid.UUID, f MemoryFilter, limit, offset int) ([]Memory, int, error)
+	BeliefsAsOf(ctx context.Context, agentID, tenantID uuid.UUID, at time.Time, limit int) ([]BeliefAtTime, int, error)
 	// Decay methods
 	ListDistinctAgentIDs(ctx context.Context) ([]uuid.UUID, error)
 	GetByAgentForDecay(ctx context.Context, agentID uuid.UUID) ([]Memory, error)
@@ -137,10 +163,24 @@ type TensionResult struct {
 	Explanation  string            `json:"explanation"`
 }
 
+// ContradictionPair is a detected conflict between two beliefs, with the content
+// of each side for display.
+type ContradictionPair struct {
+	BeliefID         uuid.UUID `json:"belief_id"`
+	BeliefContent    string    `json:"belief_content"`
+	BeliefConfidence float32   `json:"belief_confidence"`
+	OtherID          uuid.UUID `json:"other_id"`
+	OtherContent     string    `json:"other_content"`
+	OtherConfidence  float32   `json:"other_confidence"`
+	DetectedAt       time.Time `json:"detected_at"`
+}
+
 type ContradictionStore interface {
 	Create(ctx context.Context, beliefID, contradictedByID uuid.UUID) error
 	GetByBeliefID(ctx context.Context, beliefID uuid.UUID) ([]BeliefContradiction, error)
 	GetByContradictedByID(ctx context.Context, contradictedByID uuid.UUID) ([]BeliefContradiction, error)
+	CountByAgent(ctx context.Context, agentID, tenantID uuid.UUID) (int, error)
+	ListByAgent(ctx context.Context, agentID, tenantID uuid.UUID, limit int) ([]ContradictionPair, error)
 }
 
 type Message struct {

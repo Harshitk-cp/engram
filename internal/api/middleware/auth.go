@@ -14,9 +14,18 @@ import (
 type contextKey string
 
 const (
-	tenantContextKey  contextKey = "tenant"
-	authContextKey    contextKey = "auth"
+	tenantContextKey contextKey = "tenant"
+	authContextKey   contextKey = "auth"
 )
+
+// SessionCookieName is the console session cookie.
+const SessionCookieName = "engram_session"
+
+// SessionResolver turns a raw session token into a data-plane auth context.
+// Implemented by the control-plane AuthService.
+type SessionResolver interface {
+	ResolveSessionAuth(ctx context.Context, rawToken string) (*domain.APIKeyAuth, error)
+}
 
 func TenantFromContext(ctx context.Context) *domain.Tenant {
 	if a, ok := ctx.Value(authContextKey).(*domain.APIKeyAuth); ok && a != nil {
@@ -63,6 +72,43 @@ func APIKeyAuth(apiKeyStore domain.APIKeyStore) func(http.Handler) http.Handler 
 
 			ctx := context.WithValue(r.Context(), authContextKey, auth)
 			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// SessionOrAPIKey authenticates a request via the console session cookie first,
+// then falls back to a Bearer API key. Both resolve to a *domain.APIKeyAuth in
+// the request context, so all /v1 handlers work for the browser console and for
+// programmatic clients without any per-handler changes.
+func SessionOrAPIKey(apiKeyStore domain.APIKeyStore, resolver SessionResolver) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if resolver != nil {
+				if c, err := r.Cookie(SessionCookieName); err == nil && c.Value != "" {
+					if auth, err := resolver.ResolveSessionAuth(r.Context(), c.Value); err == nil && auth != nil {
+						next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey, auth)))
+						return
+					}
+				}
+			}
+
+			authHeader := r.Header.Get("Authorization")
+			if authHeader == "" {
+				writeError(w, http.StatusUnauthorized, "missing authorization")
+				return
+			}
+			parts := strings.SplitN(authHeader, " ", 2)
+			if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+				writeError(w, http.StatusUnauthorized, "invalid authorization header format")
+				return
+			}
+			auth, err := apiKeyStore.GetAuthByHash(r.Context(), HashAPIKey(parts[1]))
+			if err != nil {
+				writeError(w, http.StatusUnauthorized, "invalid API key")
+				return
+			}
+			go func() { _ = apiKeyStore.UpdateLastUsed(context.Background(), auth.KeyID) }()
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey, auth)))
 		})
 	}
 }

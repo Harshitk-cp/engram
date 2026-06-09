@@ -17,6 +17,7 @@ type LearningService struct {
 	episodeMemUsageStore domain.EpisodeMemoryUsageStore
 	mutationLogStore     domain.MutationLogStore
 	learningStatsStore   domain.LearningStatsStore
+	uow                  *store.UnitOfWork
 	logger               *zap.Logger
 }
 
@@ -42,6 +43,10 @@ func (s *LearningService) SetMutationLogStore(store domain.MutationLogStore) {
 
 func (s *LearningService) SetLearningStatsStore(store domain.LearningStatsStore) {
 	s.learningStatsStore = store
+}
+
+func (s *LearningService) SetUnitOfWork(uow *store.UnitOfWork) {
+	s.uow = uow
 }
 
 // RecordMemoryUsage records which memories were used during an episode.
@@ -123,27 +128,39 @@ func (s *LearningService) applyOutcomeEffect(ctx context.Context, memID uuid.UUI
 		newReinforcement = 0
 	}
 
-	// Update memory
-	if err := s.memoryStore.UpdateReinforcement(ctx, memory.ID, newConfidence, newReinforcement); err != nil {
-		return err
+	mutation := &domain.MutationLog{
+		MemoryID:              memory.ID,
+		AgentID:               memory.AgentID,
+		TenantID:              &memory.TenantID,
+		MutationType:          domain.MutationOutcome,
+		SourceType:            domain.MutationSourceSystem,
+		SourceID:              &episodeID,
+		OldConfidence:         &oldConfidence,
+		NewConfidence:         &newConfidence,
+		OldReinforcementCount: &oldReinforcement,
+		NewReinforcementCount: &newReinforcement,
+		Reason:                "outcome: " + string(feedbackType),
 	}
 
-	// Log mutation
-	if s.mutationLogStore != nil {
-		mutation := &domain.MutationLog{
-			MemoryID:              memory.ID,
-			AgentID:               memory.AgentID,
-			MutationType:          domain.MutationOutcome,
-			SourceType:            domain.MutationSourceSystem,
-			SourceID:              &episodeID,
-			OldConfidence:         &oldConfidence,
-			NewConfidence:         &newConfidence,
-			OldReinforcementCount: &oldReinforcement,
-			NewReinforcementCount: &newReinforcement,
-			Reason:                "outcome: " + string(feedbackType),
+	if s.uow != nil {
+		// Atomic path: memory update + audit row commit together.
+		if err := s.uow.Do(ctx, func(st *store.TxStores) error {
+			if err := st.Memory.UpdateReinforcement(ctx, memory.ID, newConfidence, newReinforcement); err != nil {
+				return err
+			}
+			return st.MutationLog.Create(ctx, mutation)
+		}); err != nil {
+			return err
 		}
-		if err := s.mutationLogStore.Create(ctx, mutation); err != nil {
-			s.logger.Warn("failed to log mutation", zap.Error(err))
+	} else {
+		// Fallback (no unit of work, e.g. unit tests): non-atomic.
+		if err := s.memoryStore.UpdateReinforcement(ctx, memory.ID, newConfidence, newReinforcement); err != nil {
+			return err
+		}
+		if s.mutationLogStore != nil {
+			if err := s.mutationLogStore.Create(ctx, mutation); err != nil {
+				s.logger.Warn("failed to log mutation", zap.Error(err))
+			}
 		}
 	}
 
@@ -183,6 +200,18 @@ func (s *LearningService) GetLearningStats(ctx context.Context, agentID uuid.UUI
 }
 
 // ComputeLearningStats computes and stores learning statistics for an agent over a time period.
+// countsTowardLearning reports whether a mutation type reflects the agent
+// actually learning (and so should move learning_velocity), as opposed to passive
+// decay or operator/maintenance actions.
+func countsTowardLearning(t domain.MutationType) bool {
+	switch t {
+	case domain.MutationFeedback, domain.MutationOutcome, domain.MutationReinforcement, domain.MutationContradiction:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *LearningService) ComputeLearningStats(ctx context.Context, agentID uuid.UUID, periodStart, periodEnd time.Time) (*domain.LearningStats, error) {
 	if s.mutationLogStore == nil || s.learningStatsStore == nil {
 		return nil, nil
@@ -205,8 +234,10 @@ func (s *LearningService) ComputeLearningStats(ctx context.Context, agentID uuid
 			continue
 		}
 
-		// Count confidence changes
-		if m.OldConfidence != nil && m.NewConfidence != nil {
+		// Only agent learning signals count toward velocity. Passive decay and
+		// operator events (deletion/archive/admin_override/redaction) are excluded
+		// so they don't swamp or corrupt learning_velocity.
+		if countsTowardLearning(m.MutationType) && m.OldConfidence != nil && m.NewConfidence != nil {
 			if *m.NewConfidence > *m.OldConfidence {
 				stats.ConfidenceIncreases++
 			} else if *m.NewConfidence < *m.OldConfidence {

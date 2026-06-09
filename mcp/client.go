@@ -74,6 +74,11 @@ func (c *Client) Remember(ctx context.Context, agentID, content, memType, source
 		"content":  content,
 		"source":   source,
 	}
+	// `source` carries the belief's origin (user/agent/inferred/tool); send it as
+	// provenance too so the server records it and derives the initial confidence.
+	if source != "" {
+		body["provenance"] = source
+	}
 	if memType != "" {
 		body["type"] = memType
 	}

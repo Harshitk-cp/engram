@@ -96,9 +96,14 @@ func (h *AgentHandler) List(w http.ResponseWriter, r *http.Request) {
 	if agents == nil {
 		agents = []domain.Agent{}
 	}
+	total, err := h.svc.Count(r.Context(), tenant.ID)
+	if err != nil {
+		total = len(agents)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"agents": agents,
+		"total":  total,
 		"count":  len(agents),
 		"limit":  limit,
 		"offset": offset,

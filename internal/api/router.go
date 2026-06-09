@@ -5,9 +5,11 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/Harshitk-cp/engram/console"
 	"github.com/Harshitk-cp/engram/internal/api/handlers"
 	mw "github.com/Harshitk-cp/engram/internal/api/middleware"
 	"github.com/Harshitk-cp/engram/internal/config"
@@ -54,6 +56,9 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	episodeMemUsageStore := store.NewEpisodeMemoryUsageStore(db)
 	learningStatsStore := store.NewLearningStatsStore(db)
 
+	// Unit of work for atomic state-change + audit-log writes.
+	uow := store.NewUnitOfWork(db, memoryStore, mutationLogStore, contradictionStore)
+
 	// External clients via provider factory
 	var embeddingClient domain.EmbeddingClient
 	var llmClient domain.LLMClient
@@ -83,6 +88,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	memorySvc := service.NewMemoryService(memoryStore, agentStore, embeddingClient, llmClient, logger)
 	policySvc := service.NewPolicyService(policyStore, memoryStore, agentStore, llmClient, embeddingClient, logger)
 	feedbackSvc := service.NewFeedbackService(feedbackStore, memoryStore, agentStore)
+	feedbackSvc.SetUnitOfWork(uow)
 	tunerSvc := service.NewTunerService(feedbackStore, policyStore, logger)
 	expirerSvc := service.NewExpirerService(memoryStore, policyStore, feedbackStore, logger)
 	expirerSvc.SetSessionStore(sessionStore)
@@ -93,9 +99,13 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	wmSvc := service.NewWorkingMemoryService(wmStore, assocStore, memoryStore, episodeStore, procedureStore, schemaStore, embeddingClient, logger)
 	consolidationSvc := service.NewConsolidationService(memoryStore, episodeStore, procedureStore, schemaStore, assocStore, contradictionStore, embeddingClient, llmClient, logger)
 	decaySvc := service.NewDecayService(memoryStore, episodeStore, logger)
+	decaySvc.SetMutationLogStore(mutationLogStore)
+	decaySvc.SetUnitOfWork(uow)
 	consolidationSvc.SetDecayService(decaySvc)
 	consolidationSvc.SetGraphStore(graphStore)
 	metacognitiveSvc := service.NewMetacognitiveService(memoryStore, episodeStore, procedureStore, schemaStore, contradictionStore, embeddingClient, logger)
+	adminSvc := service.NewAdminService(memoryStore, embeddingClient, uow, logger)
+	consoleSvc := service.NewConsoleService(memoryStore, contradictionStore, learningStatsStore, logger)
 
 	// Graph services
 	hybridRecallSvc := service.NewHybridRecallService(memoryStore, graphStore, entityStore, embeddingClient, llmClient)
@@ -107,12 +117,15 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	learningSvc.SetMutationLogStore(mutationLogStore)
 	learningSvc.SetEpisodeMemoryUsageStore(episodeMemUsageStore)
 	learningSvc.SetLearningStatsStore(learningStatsStore)
+	learningSvc.SetUnitOfWork(uow)
 	implicitFeedbackSvc := service.NewImplicitFeedbackDetector(llmClient, feedbackStore, memoryStore, logger)
 	implicitFeedbackSvc.SetMutationLogStore(mutationLogStore)
 
 	// Wire policy enforcer and contradiction store into memory service
 	memorySvc.SetPolicyEnforcer(policySvc)
 	memorySvc.SetContradictionStore(contradictionStore)
+	memorySvc.SetMutationLogStore(mutationLogStore)
+	memorySvc.SetUnitOfWork(uow)
 	if os.Getenv("DISABLE_GRAPH") != "true" {
 		memorySvc.SetGraphBuilder(graphBuilderSvc)
 	}
@@ -123,9 +136,18 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	// Key store
 	apiKeyStore := store.NewAPIKeyStore(db)
 
+	// Control plane (console auth): users, social identities, orgs, sessions.
+	userStore := store.NewUserStore(db)
+	oauthStore := store.NewOAuthAccountStore(db)
+	membershipStore := store.NewMembershipStore(db)
+	consoleSessionStore := store.NewConsoleSessionStore(db)
+	sessionTTL := time.Duration(config.SessionTTLHours()) * time.Hour
+	authSvc := service.NewAuthService(userStore, oauthStore, membershipStore, consoleSessionStore, tenantStore, config.DefaultTenantID(), config.DefaultTenantRole(), sessionTTL, logger)
+
 	// Handlers
 	tenantHandler := handlers.NewTenantHandler(tenantStore, apiKeyStore)
 	setupHandler := handlers.NewSetupHandler(tenantStore, apiKeyStore, config.SetupToken())
+	authHandler := handlers.NewAuthHandler(authSvc, sessionTTL)
 	agentHandler := handlers.NewAgentHandler(agentSvc)
 	memoryHandler := handlers.NewMemoryHandler(memorySvc, hybridRecallSvc, entityStore, sessionStore)
 	anchorHandler := handlers.NewAnchorHandler(entityStore, memoryStore)
@@ -140,6 +162,9 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	cognitiveHandler := handlers.NewCognitiveHandler(decaySvc, consolidationSvc)
 	cognitiveHandler.SetConfidenceService(confidenceSvc)
 	metacognitiveHandler := handlers.NewMetacognitiveHandler(metacognitiveSvc)
+	adminHandler := handlers.NewAdminHandler(adminSvc)
+	consoleHandler := handlers.NewConsoleHandler(consoleSvc)
+	auditHandler := handlers.NewAuditHandler(mutationLogStore, config.AuditSigningKey())
 	mindHandler := handlers.NewMindHandler(memoryStore, episodeStore, procedureStore, schemaStore)
 	tierHandler := handlers.NewTierHandler(memorySvc)
 	graphHandler := handlers.NewGraphHandler(hybridRecallSvc, graphBuilderSvc, graphStore, entityStore)
@@ -164,11 +189,22 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 
 	// Global middleware (order matters)
 	r.Use(mw.RequestID)                                                 // Generate/extract request ID first
+	r.Use(mw.CORS(config.CORSAllowedOrigins()))
 	r.Use(middleware.RealIP)                                            // Extract real IP
 	r.Use(metricsCollector.Middleware)                                  // Collect metrics
 	r.Use(mw.Logging(logger))                                           // Log all requests
 	r.Use(middleware.Recoverer)                                         // Recover from panics
 	r.Use(mw.RateLimit(config.RateLimitRPS(), config.RateLimitBurst())) // Rate limiting
+
+	// Embedded console SPA served at the site root (e.g. console.engram.to): any
+	// unmatched path — static assets and client-side deep links alike — falls
+	// through to it, while requests under an API namespace still get a JSON 404
+	// rather than the HTML shell.
+	if spa, err := console.Handler(); err != nil {
+		logger.Warn("console SPA unavailable", zap.Error(err))
+	} else {
+		r.NotFound(spaFallback(spa))
+	}
 
 	// Health (no auth)
 	r.Get("/health", healthHandler(db))
@@ -183,8 +219,22 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	r.Post("/v1/tenants", tenantHandler.Create)
 
 	// Authenticated routes
+	// Control-plane auth routes (public; session cookie based).
+	r.Route("/auth", func(r chi.Router) {
+		r.Post("/register", authHandler.Register)
+		r.Post("/login", authHandler.Login)
+		r.Post("/logout", authHandler.Logout)
+		r.Get("/me", authHandler.Me)
+		r.Post("/switch-tenant", authHandler.SwitchTenant)
+		r.Get("/config", authHandler.Config)
+		r.Get("/oauth/{provider}/start", authHandler.OAuthStart)
+		r.Get("/oauth/{provider}/callback", authHandler.OAuthCallback)
+		r.Get("/sso/start", authHandler.SSOStart)
+		r.Get("/sso/callback", authHandler.SSOCallback)
+	})
+
 	r.Route("/v1", func(r chi.Router) {
-		r.Use(mw.APIKeyAuth(apiKeyStore))
+		r.Use(mw.SessionOrAPIKey(apiKeyStore, authSvc))
 
 		// Key management (admin scope required)
 		r.Route("/keys", func(r chi.Router) {
@@ -207,6 +257,11 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 				r.Get("/tier-stats", tierHandler.GetTierStats)
 				r.Get("/hot-memories", tierHandler.GetHotMemories)
 				r.Get("/learning/stats", learningHandler.GetStats)
+				r.Get("/dashboard", consoleHandler.Dashboard)
+				r.Get("/review-queue", consoleHandler.ReviewQueue)
+				r.Get("/memories", consoleHandler.Memories)
+				r.Get("/snapshot", consoleHandler.Snapshot)
+				r.Get("/contradictions", consoleHandler.Contradictions)
 				r.Post("/conversations/ingest", conversationHandler.Ingest)
 			})
 		})
@@ -218,8 +273,24 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 			r.Post("/", memoryHandler.Create)
 			r.Get("/{id}", memoryHandler.GetByID)
 			r.Delete("/{id}", memoryHandler.Delete)
+			r.With(mw.RequireScope("admin")).Patch("/{id}", adminHandler.UpdateMemory)
 			r.Post("/{id}/restore", memoryHandler.Restore)
 			r.Get("/{id}/mutations", learningHandler.GetMutationHistory)
+		})
+
+		// Audited admin operations (operator corrections, redaction).
+		r.Route("/admin", func(r chi.Router) {
+			r.Use(mw.RequireScope("admin"))
+			r.Post("/memories/{id}/redact", adminHandler.Redact)
+			r.Post("/contradictions/resolve", adminHandler.ResolveContradiction)
+			r.Post("/anchors/{id}/shred", adminHandler.CryptoShredAnchor)
+		})
+
+		// Tamper-evident audit trail.
+		r.Route("/audit", func(r chi.Router) {
+			r.Use(mw.RequireScope("admin"))
+			r.Get("/verify", auditHandler.Verify)
+			r.Get("/export", auditHandler.Export)
 		})
 
 		// Anchors (who/what memories are about)
@@ -329,6 +400,24 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 // NewRouter returns just the chi.Mux for backward compatibility.
 func NewRouter(db *pgxpool.Pool, logger *zap.Logger) *chi.Mux {
 	return NewApp(db, logger).Router
+}
+
+// spaFallback serves the console SPA for any unmatched path, except requests
+// under an API namespace, which get a JSON 404 so clients don't receive the HTML
+// shell in place of an error.
+func spaFallback(spa http.Handler) http.HandlerFunc {
+	apiPrefixes := []string{"/v1", "/auth", "/health", "/metrics"}
+	return func(w http.ResponseWriter, r *http.Request) {
+		for _, p := range apiPrefixes {
+			if r.URL.Path == p || strings.HasPrefix(r.URL.Path, p+"/") {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]string{"error": "not found"})
+				return
+			}
+		}
+		spa.ServeHTTP(w, r)
+	}
 }
 
 func healthHandler(db *pgxpool.Pool) http.HandlerFunc {

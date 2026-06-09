@@ -46,6 +46,16 @@ func (m *mockAgentStore) GetByExternalID(ctx context.Context, externalID string,
 	return nil, store.ErrNotFound
 }
 
+func (m *mockAgentStore) CountByTenant(ctx context.Context, tenantID uuid.UUID) (int, error) {
+	n := 0
+	for _, a := range m.agents {
+		if a.TenantID == tenantID {
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (m *mockAgentStore) ListByTenantID(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]domain.Agent, error) {
 	var result []domain.Agent
 	for _, a := range m.agents {

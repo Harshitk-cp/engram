@@ -90,6 +90,14 @@ func (m *mockMemoryStoreForConsolidation) UpdateReinforcement(ctx context.Contex
 	return nil
 }
 
+func (m *mockMemoryStoreForConsolidation) UpdateContent(ctx context.Context, id uuid.UUID, content string, embedding []float32) error {
+	return nil
+}
+
+func (m *mockMemoryStoreForConsolidation) RedactContent(ctx context.Context, id uuid.UUID, tombstone string) error {
+	return nil
+}
+
 func (m *mockMemoryStoreForConsolidation) UpdateConfidence(ctx context.Context, id uuid.UUID, confidence float32) error {
 	m.updated[id] = confidence
 	return nil
@@ -149,6 +157,10 @@ func (m *mockMemoryStoreForConsolidation) ArchiveExpiredSessionMemories(ctx cont
 
 func (m *mockMemoryStoreForConsolidation) PromoteSessionToAnchor(ctx context.Context, id uuid.UUID) (bool, error) {
 	return false, nil
+}
+
+func (m *mockMemoryStoreForConsolidation) CountNeedsReview(ctx context.Context, agentID, tenantID uuid.UUID) (int, error) {
+	return 0, nil
 }
 
 func (m *mockMemoryStoreForConsolidation) GetNeedsReview(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, limit int) ([]domain.Memory, error) {
@@ -819,4 +831,12 @@ func TestConsolidationService_StartStop(t *testing.T) {
 	svc.Stop()
 
 	// Should be able to stop without hanging
+}
+
+func (m *mockMemoryStoreForConsolidation) ListByAgentFiltered(ctx context.Context, agentID, tenantID uuid.UUID, f domain.MemoryFilter, limit, offset int) ([]domain.Memory, int, error) {
+	return nil, 0, nil
+}
+
+func (m *mockMemoryStoreForConsolidation) BeliefsAsOf(ctx context.Context, agentID, tenantID uuid.UUID, at time.Time, limit int) ([]domain.BeliefAtTime, int, error) {
+	return nil, 0, nil
 }

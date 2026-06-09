@@ -36,8 +36,14 @@ func rememberTool() Tool {
 					"description": "Memory type. Defaults to 'fact'.",
 				},
 				"source": map[string]interface{}{
-					"type":        "string",
-					"description": "Where this memory came from (e.g. 'user', 'agent', 'tool'). Defaults to 'agent'.",
+					"type": "string",
+					"enum": []string{"user", "agent", "inferred", "tool", "derived"},
+					"description": "Who this belief ORIGINATED from — set it deliberately, it sets the initial confidence: " +
+						"'user' = the user explicitly stated or confirmed it (highest trust, 0.9); " +
+						"'inferred' = you inferred it from the conversation, not stated outright (0.4); " +
+						"'agent' = the assistant's own reasoning/decision (0.6); " +
+						"'tool' = it came from a tool/function result (0.8). " +
+						"Use 'user' for facts and preferences the user told you; do not default everything to 'agent'.",
 				},
 				"agent_id": map[string]interface{}{
 					"type":        "string",

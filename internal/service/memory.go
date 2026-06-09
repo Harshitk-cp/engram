@@ -132,6 +132,8 @@ type MemoryService struct {
 	llmClient             domain.LLMClient
 	contradictionDetector contradiction.Detector
 	contradictionStore    domain.ContradictionStore
+	mutationLogStore      domain.MutationLogStore
+	uow                   *store.UnitOfWork
 	policyEnforcer        PolicyEnforcer
 	graphBuilder          GraphBuilder
 	logger                *zap.Logger
@@ -171,6 +173,61 @@ func (s *MemoryService) runBoostWorker() {
 
 func (s *MemoryService) SetContradictionStore(cs domain.ContradictionStore) {
 	s.contradictionStore = cs
+}
+
+func (s *MemoryService) SetMutationLogStore(mls domain.MutationLogStore) {
+	s.mutationLogStore = mls
+}
+
+func (s *MemoryService) SetUnitOfWork(uow *store.UnitOfWork) {
+	s.uow = uow
+}
+
+// buildContradictionMutation builds an audit row for a belief change caused by a
+// contradicting belief; source_id points at the contradicting belief.
+func buildContradictionMutation(existing *domain.MemoryWithScore, contradictedByID uuid.UUID, oldConf, newConf float32, reason string) *domain.MutationLog {
+	cbID := contradictedByID
+	tenantID := existing.TenantID
+	return &domain.MutationLog{
+		MemoryID:      existing.ID,
+		AgentID:       existing.AgentID,
+		TenantID:      &tenantID,
+		MutationType:  domain.MutationContradiction,
+		SourceType:    domain.MutationSourceSystem,
+		SourceID:      &cbID,
+		OldConfidence: &oldConf,
+		NewConfidence: &newConf,
+		Reason:        reason,
+	}
+}
+
+// tensionWriters bundles the stores a contradiction-handling branch writes to, so
+// the same branch logic runs either inside a transaction or directly.
+type tensionWriters struct {
+	mem    domain.MemoryStore
+	contra domain.ContradictionStore
+	mlog   domain.MutationLogStore
+}
+
+// applyTensionWrites runs fn atomically inside the unit of work when available,
+// falling back to the pool-backed stores (e.g. in unit tests) otherwise.
+func (s *MemoryService) applyTensionWrites(ctx context.Context, fn func(tensionWriters) error) error {
+	if s.uow != nil {
+		return s.uow.Do(ctx, func(st *store.TxStores) error {
+			return fn(tensionWriters{mem: st.Memory, contra: st.Contradiction, mlog: st.MutationLog})
+		})
+	}
+	return fn(tensionWriters{mem: s.memoryStore, contra: s.contradictionStore, mlog: s.mutationLogStore})
+}
+
+// enforceCreatePolicy runs policy enforcement for a newly created belief. It is
+// best-effort and intentionally runs outside any transaction.
+func (s *MemoryService) enforceCreatePolicy(ctx context.Context, m *domain.Memory) {
+	if s.policyEnforcer != nil {
+		if err := s.policyEnforcer.EnforceOnCreate(ctx, m); err != nil {
+			s.logger.Warn("policy enforcement failed after memory creation", zap.Error(err))
+		}
+	}
 }
 
 func (s *MemoryService) SetPolicyEnforcer(pe PolicyEnforcer) {
@@ -698,46 +755,56 @@ func (s *MemoryService) handleTension(ctx context.Context, tension *domain.Tensi
 		if tension.TensionScore <= 0.25 {
 			return false, nil
 		}
-		// Demote old belief significantly, create new
+		// Demote old belief significantly, create new — atomically with the audit row.
 		newOldConfidence := existing.Confidence - ContradictionConfidencePenalty
 		if newOldConfidence < MinConfidence {
 			newOldConfidence = MinConfidence
 		}
-		if err := s.memoryStore.UpdateConfidence(ctx, existing.ID, newOldConfidence); err != nil {
-			s.logger.Warn("failed to update contradicted belief confidence", zap.Error(err))
-		}
 		m.Confidence = NewContradictingBeliefConfidence
-		if err := s.memoryStore.Create(ctx, m); err != nil {
+		if err := s.applyTensionWrites(ctx, func(w tensionWriters) error {
+			if err := w.mem.UpdateConfidence(ctx, existing.ID, newOldConfidence); err != nil {
+				return err
+			}
+			if err := w.mem.Create(ctx, m); err != nil {
+				return err
+			}
+			if w.contra != nil {
+				if err := w.contra.Create(ctx, existing.ID, m.ID); err != nil {
+					return err
+				}
+			}
+			if w.mlog != nil {
+				return w.mlog.Create(ctx, buildContradictionMutation(existing, m.ID, existing.Confidence, newOldConfidence,
+					"contradiction: hard — belief demoted, superseded by contradicting belief"))
+			}
+			return nil
+		}); err != nil {
 			return false, err
 		}
-		if s.contradictionStore != nil {
-			if err := s.contradictionStore.Create(ctx, existing.ID, m.ID); err != nil {
-				s.logger.Warn("failed to record contradiction", zap.Error(err))
-			}
-		}
-		if s.policyEnforcer != nil {
-			if err := s.policyEnforcer.EnforceOnCreate(ctx, m); err != nil {
-				s.logger.Warn("policy enforcement failed after memory creation", zap.Error(err))
-			}
-		}
+		s.enforceCreatePolicy(ctx, m)
 		return true, nil
 
 	case domain.ContradictionTemporal:
-		// Archive old belief, create new with boosted confidence (time evolution)
-		if err := s.memoryStore.Archive(ctx, existing.ID); err != nil {
-			s.logger.Warn("failed to archive temporally superseded belief", zap.Error(err))
-		}
+		// Archive old belief, create new with boosted confidence (time evolution).
 		if m.Confidence == 0 {
 			m.Confidence = NewContradictingBeliefConfidence
 		}
-		if err := s.memoryStore.Create(ctx, m); err != nil {
+		if err := s.applyTensionWrites(ctx, func(w tensionWriters) error {
+			if err := w.mem.Archive(ctx, existing.ID); err != nil {
+				return err
+			}
+			if err := w.mem.Create(ctx, m); err != nil {
+				return err
+			}
+			if w.mlog != nil {
+				return w.mlog.Create(ctx, buildContradictionMutation(existing, m.ID, existing.Confidence, existing.Confidence,
+					"contradiction: temporal — belief archived, superseded by newer belief"))
+			}
+			return nil
+		}); err != nil {
 			return false, err
 		}
-		if s.policyEnforcer != nil {
-			if err := s.policyEnforcer.EnforceOnCreate(ctx, m); err != nil {
-				s.logger.Warn("policy enforcement failed after memory creation", zap.Error(err))
-			}
-		}
+		s.enforceCreatePolicy(ctx, m)
 		return true, nil
 
 	case domain.ContradictionContextual:
@@ -745,11 +812,7 @@ func (s *MemoryService) handleTension(ctx context.Context, tension *domain.Tensi
 		if err := s.memoryStore.Create(ctx, m); err != nil {
 			return false, err
 		}
-		if s.policyEnforcer != nil {
-			if err := s.policyEnforcer.EnforceOnCreate(ctx, m); err != nil {
-				s.logger.Warn("policy enforcement failed after memory creation", zap.Error(err))
-			}
-		}
+		s.enforceCreatePolicy(ctx, m)
 		return true, nil
 
 	case domain.ContradictionSoft:
@@ -761,10 +824,19 @@ func (s *MemoryService) handleTension(ctx context.Context, tension *domain.Tensi
 		if newOldConfidence < MinConfidence {
 			newOldConfidence = MinConfidence
 		}
-		if err := s.memoryStore.UpdateConfidence(ctx, existing.ID, newOldConfidence); err != nil {
-			s.logger.Warn("failed to reduce soft-contradicted belief confidence", zap.Error(err))
-		}
-		if err := s.memoryStore.Create(ctx, m); err != nil {
+		if err := s.applyTensionWrites(ctx, func(w tensionWriters) error {
+			if err := w.mem.UpdateConfidence(ctx, existing.ID, newOldConfidence); err != nil {
+				return err
+			}
+			if err := w.mem.Create(ctx, m); err != nil {
+				return err
+			}
+			if w.mlog != nil {
+				return w.mlog.Create(ctx, buildContradictionMutation(existing, m.ID, existing.Confidence, newOldConfidence,
+					"contradiction: soft — belief confidence reduced by competing belief"))
+			}
+			return nil
+		}); err != nil {
 			return false, err
 		}
 		return true, nil

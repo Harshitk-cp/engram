@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -138,6 +139,83 @@ func RateLimitBurst() int {
 	}
 	return burst
 }
+
+// CORSAllowedOrigins returns the browser origins permitted to call the API,
+// parsed from the comma-separated CORS_ALLOWED_ORIGINS env var. An empty result
+// disables CORS; a single "*" allows any origin. Used by the console frontend.
+func CORSAllowedOrigins() []string {
+	raw := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS"))
+	if raw == "" {
+		return nil
+	}
+	var origins []string
+	for _, o := range strings.Split(raw, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			origins = append(origins, o)
+		}
+	}
+	return origins
+}
+
+// ---- Control plane (console auth) ----
+
+// DefaultTenantID, if set, is the org that newly-signed-up users auto-join
+// (instead of getting a fresh org). Used to point demo signups at seeded data.
+func DefaultTenantID() string { return strings.TrimSpace(os.Getenv("ENGRAM_DEFAULT_TENANT_ID")) }
+
+// DefaultTenantRole is the role new users get when auto-joining the default org.
+// Product default is "member"; set to "admin" in a demo so signups can manage
+// keys and resolve contradictions on the shared seeded org.
+func DefaultTenantRole() string {
+	r := strings.ToLower(strings.TrimSpace(os.Getenv("ENGRAM_DEFAULT_TENANT_ROLE")))
+	switch r {
+	case "owner", "admin", "member":
+		return r
+	default:
+		return "member"
+	}
+}
+
+// SessionTTLHours is how long a console session lasts. Default 30 days.
+func SessionTTLHours() int {
+	if n, err := strconv.Atoi(os.Getenv("SESSION_TTL_HOURS")); err == nil && n > 0 {
+		return n
+	}
+	return 720
+}
+
+// CookieSecure controls the Secure flag on the session cookie. Default false so
+// it works on http://localhost; set COOKIE_SECURE=true behind HTTPS.
+func CookieSecure() bool { return strings.EqualFold(os.Getenv("COOKIE_SECURE"), "true") }
+
+// AppBaseURL is the externally-reachable base URL, used to build OAuth redirect
+// URIs. Defaults to http://localhost:<port>.
+func AppBaseURL() string {
+	if v := strings.TrimSpace(os.Getenv("APP_BASE_URL")); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return fmt.Sprintf("http://localhost:%d", ServerPort())
+}
+
+// GoogleOAuth returns (clientID, clientSecret); empty when not configured.
+func GoogleOAuth() (string, string) {
+	return os.Getenv("GOOGLE_OAUTH_CLIENT_ID"), os.Getenv("GOOGLE_OAUTH_CLIENT_SECRET")
+}
+
+// GitHubOAuth returns (clientID, clientSecret); empty when not configured.
+func GitHubOAuth() (string, string) {
+	return os.Getenv("GITHUB_OAUTH_CLIENT_ID"), os.Getenv("GITHUB_OAUTH_CLIENT_SECRET")
+}
+
+// WorkOSAuth returns (clientID, apiKey) for WorkOS enterprise SSO (AuthKit);
+// empty when not configured. The API key is the client secret for token exchange.
+func WorkOSAuth() (string, string) {
+	return os.Getenv("WORKOS_CLIENT_ID"), os.Getenv("WORKOS_API_KEY")
+}
+
+// AuditSigningKey is an optional HMAC secret used to sign audit exports so a
+// recipient can confirm an export came from this server. Empty = unsigned export.
+func AuditSigningKey() string { return os.Getenv("AUDIT_SIGNING_KEY") }
 
 // LogLevel returns the log level (debug, info, warn, error).
 // Defaults to "info" if not set.

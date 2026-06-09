@@ -201,6 +201,14 @@ func (m *mockMemoryStoreForSchema) UpdateReinforcement(ctx context.Context, id u
 	return nil
 }
 
+func (m *mockMemoryStoreForSchema) UpdateContent(ctx context.Context, id uuid.UUID, content string, embedding []float32) error {
+	return nil
+}
+
+func (m *mockMemoryStoreForSchema) RedactContent(ctx context.Context, id uuid.UUID, tombstone string) error {
+	return nil
+}
+
 func (m *mockMemoryStoreForSchema) UpdateConfidence(ctx context.Context, id uuid.UUID, confidence float32) error {
 	return nil
 }
@@ -253,6 +261,10 @@ func (m *mockMemoryStoreForSchema) ArchiveExpiredSessionMemories(ctx context.Con
 
 func (m *mockMemoryStoreForSchema) PromoteSessionToAnchor(ctx context.Context, id uuid.UUID) (bool, error) {
 	return false, nil
+}
+
+func (m *mockMemoryStoreForSchema) CountNeedsReview(ctx context.Context, agentID, tenantID uuid.UUID) (int, error) {
+	return 0, nil
 }
 
 func (m *mockMemoryStoreForSchema) GetNeedsReview(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, limit int) ([]domain.Memory, error) {
@@ -694,4 +706,12 @@ func TestScoreTimeMatch(t *testing.T) {
 	if score != 0 {
 		t.Fatalf("expected score 0 for empty time_of_day, got %f", score)
 	}
+}
+
+func (m *mockMemoryStoreForSchema) ListByAgentFiltered(ctx context.Context, agentID, tenantID uuid.UUID, f domain.MemoryFilter, limit, offset int) ([]domain.Memory, int, error) {
+	return nil, 0, nil
+}
+
+func (m *mockMemoryStoreForSchema) BeliefsAsOf(ctx context.Context, agentID, tenantID uuid.UUID, at time.Time, limit int) ([]domain.BeliefAtTime, int, error) {
+	return nil, 0, nil
 }

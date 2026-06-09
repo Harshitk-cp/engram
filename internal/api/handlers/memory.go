@@ -33,6 +33,7 @@ type createMemoryRequest struct {
 	Content    string         `json:"content"`
 	Type       string         `json:"type,omitempty"`
 	Source     string         `json:"source,omitempty"`
+	Provenance string         `json:"provenance,omitempty"`
 	Confidence float32        `json:"confidence,omitempty"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
 	EventDate string `json:"event_date,omitempty"`
@@ -112,6 +113,15 @@ func (h *MemoryHandler) Create(w http.ResponseWriter, r *http.Request) {
 		Source:     req.Source,
 		Confidence: req.Confidence,
 		Metadata:   req.Metadata,
+	}
+	// Honor provenance (who originated the belief). Prefer an explicit provenance;
+	// otherwise accept a `source` that is itself a provenance value (e.g. "user").
+	// Left empty, the store defaults to "agent". Provenance also drives the initial
+	// confidence (user 0.9, agent 0.6, inferred 0.4, …).
+	if domain.ValidProvenance(req.Provenance) {
+		memory.Provenance = domain.Provenance(req.Provenance)
+	} else if domain.ValidProvenance(req.Source) {
+		memory.Provenance = domain.Provenance(req.Source)
 	}
 	if req.EventDate != "" {
 		for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05", "2006-01-02"} {

@@ -93,6 +93,14 @@ func (m *mockMemoryStoreForConfidence) UpdateReinforcement(ctx context.Context, 
 	return nil
 }
 
+func (m *mockMemoryStoreForConfidence) UpdateContent(ctx context.Context, id uuid.UUID, content string, embedding []float32) error {
+	return nil
+}
+
+func (m *mockMemoryStoreForConfidence) RedactContent(ctx context.Context, id uuid.UUID, tombstone string) error {
+	return nil
+}
+
 func (m *mockMemoryStoreForConfidence) UpdateConfidence(ctx context.Context, id uuid.UUID, confidence float32) error {
 	mem := m.memories[id]
 	if mem != nil {
@@ -147,6 +155,10 @@ func (m *mockMemoryStoreForConfidence) ArchiveExpiredSessionMemories(ctx context
 
 func (m *mockMemoryStoreForConfidence) PromoteSessionToAnchor(ctx context.Context, id uuid.UUID) (bool, error) {
 	return false, nil
+}
+
+func (m *mockMemoryStoreForConfidence) CountNeedsReview(ctx context.Context, agentID, tenantID uuid.UUID) (int, error) {
+	return 0, nil
 }
 
 func (m *mockMemoryStoreForConfidence) GetNeedsReview(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, limit int) ([]domain.Memory, error) {
@@ -430,4 +442,12 @@ func TestConfidenceService_GetStats(t *testing.T) {
 	if stats.HoursSinceAccess < 99 || stats.HoursSinceAccess > 101 {
 		t.Errorf("HoursSinceAccess = %f, expected ~100", stats.HoursSinceAccess)
 	}
+}
+
+func (m *mockMemoryStoreForConfidence) ListByAgentFiltered(ctx context.Context, agentID, tenantID uuid.UUID, f domain.MemoryFilter, limit, offset int) ([]domain.Memory, int, error) {
+	return nil, 0, nil
+}
+
+func (m *mockMemoryStoreForConfidence) BeliefsAsOf(ctx context.Context, agentID, tenantID uuid.UUID, at time.Time, limit int) ([]domain.BeliefAtTime, int, error) {
+	return nil, 0, nil
 }

@@ -20,6 +20,14 @@ func newMockContradictionStoreForMetacog() *mockContradictionStoreForMetacog {
 	}
 }
 
+func (m *mockContradictionStoreForMetacog) CountByAgent(ctx context.Context, agentID, tenantID uuid.UUID) (int, error) {
+	return 0, nil
+}
+
+func (m *mockContradictionStoreForMetacog) ListByAgent(ctx context.Context, agentID, tenantID uuid.UUID, limit int) ([]domain.ContradictionPair, error) {
+	return nil, nil
+}
+
 func (m *mockContradictionStoreForMetacog) Create(ctx context.Context, beliefID, contradictedByID uuid.UUID) error {
 	contradiction := domain.BeliefContradiction{
 		ID:               uuid.New(),

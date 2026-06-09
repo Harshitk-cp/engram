@@ -39,14 +39,21 @@ type APIKey struct {
 	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 
+	// CreatedBy attributes the key to the console user who minted it (NULL for
+	// legacy/system keys). CreatedByEmail is populated on listing for display.
+	CreatedBy      *uuid.UUID `json:"created_by,omitempty"`
+	CreatedByEmail *string    `json:"created_by_email,omitempty"`
+
 	// KeyHash is only populated internally for storage; never serialised.
 	KeyHash string `json:"-"`
 }
 
 // APIKeyAuth is the result of a successful authentication lookup.
-// It combines key metadata with the owning tenant.
+// It combines key metadata with the owning tenant. For console (session) auth,
+// UserID is the human user; for programmatic API-key auth it is nil.
 type APIKeyAuth struct {
 	KeyID  uuid.UUID
+	UserID *uuid.UUID
 	Scopes []string
 	Tenant *Tenant
 }

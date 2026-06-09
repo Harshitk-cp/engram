@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Harshitk-cp/engram/internal/domain"
 	"github.com/google/uuid"
@@ -14,11 +15,17 @@ import (
 )
 
 type MemoryStore struct {
-	db *pgxpool.Pool
+	db   DBTX
+	pool *pgxpool.Pool
 }
 
 func NewMemoryStore(db *pgxpool.Pool) *MemoryStore {
-	return &MemoryStore{db: db}
+	return &MemoryStore{db: db, pool: db}
+}
+
+// withTx returns a clone of the store that runs against the given transaction.
+func (s *MemoryStore) withTx(tx pgx.Tx) *MemoryStore {
+	return &MemoryStore{db: tx, pool: s.pool}
 }
 
 func (s *MemoryStore) Create(ctx context.Context, m *domain.Memory) error {
@@ -104,18 +111,77 @@ func (s *MemoryStore) GetByIDOnly(ctx context.Context, id uuid.UUID) (*domain.Me
 	return m, nil
 }
 
-func (s *MemoryStore) Delete(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error {
-	tag, err := s.db.Exec(ctx,
-		`DELETE FROM memories WHERE id = $1 AND tenant_id = $2`,
-		id, tenantID,
+// snapshotMemoriesForRemoval writes one mutation_log row per memory matching
+// whereSQL inside tx, BEFORE the caller removes/archives those rows, so the audit
+// of a removal survives it. mutationType is 'deletion' or 'archive'; retainContent
+// stores the original text (pass false for GDPR erasure, where only the hash is kept).
+func snapshotMemoriesForRemoval(ctx context.Context, tx pgx.Tx, mutationType domain.MutationType, reason string, retainContent bool, whereSQL string, args ...any) error {
+	rows, err := tx.Query(ctx,
+		`SELECT id, agent_id, tenant_id, anchor_id, binding::text, content FROM memories WHERE `+whereSQL,
+		args...,
 	)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+	type snap struct {
+		id, agentID, tenantID uuid.UUID
+		anchorID              *uuid.UUID
+		binding, content      string
+	}
+	var snaps []snap
+	for rows.Next() {
+		var sp snap
+		if err := rows.Scan(&sp.id, &sp.agentID, &sp.tenantID, &sp.anchorID, &sp.binding, &sp.content); err != nil {
+			rows.Close()
+			return err
+		}
+		snaps = append(snaps, sp)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for i := range snaps {
+		sp := &snaps[i]
+		tid := sp.tenantID
+		ml := &domain.MutationLog{
+			MemoryID:     sp.id,
+			AgentID:      sp.agentID,
+			MutationType: mutationType,
+			SourceType:   domain.MutationSourceSystem,
+			Reason:       reason,
+			TenantID:     &tid,
+			AnchorID:     sp.anchorID,
+			Binding:      sp.binding,
+			ContentHash:  domain.HashContent(sp.content),
+		}
+		if retainContent {
+			c := sp.content
+			ml.ContentSnapshot = &c
+		}
+		if err := insertMutationLog(ctx, tx, ml); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+func (s *MemoryStore) Delete(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error {
+	return WithTx(ctx, s.pool, func(tx pgx.Tx) error {
+		if err := snapshotMemoriesForRemoval(ctx, tx, domain.MutationDeletion, "deletion: api delete", true,
+			"id = $1 AND tenant_id = $2", id, tenantID); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, `DELETE FROM memories WHERE id = $1 AND tenant_id = $2`, id, tenantID)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return ErrNotFound
+		}
+		return nil
+	})
 }
 
 func (s *MemoryStore) ListByAnchor(ctx context.Context, anchorID, tenantID uuid.UUID, limit int) ([]domain.Memory, error) {
@@ -147,14 +213,22 @@ func (s *MemoryStore) ListByAnchor(ctx context.Context, anchorID, tenantID uuid.
 }
 
 func (s *MemoryStore) PurgeByAnchor(ctx context.Context, anchorID, tenantID uuid.UUID) (int64, error) {
-	tag, err := s.db.Exec(ctx,
-		`DELETE FROM memories WHERE anchor_id = $1 AND tenant_id = $2`,
-		anchorID, tenantID,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return tag.RowsAffected(), nil
+	var affected int64
+	err := WithTx(ctx, s.pool, func(tx pgx.Tx) error {
+		// GDPR erasure: keep the hash as proof of what was erased, but do NOT
+		// retain the original content (that would defeat the erasure).
+		if err := snapshotMemoriesForRemoval(ctx, tx, domain.MutationDeletion, "deletion: anchor purge (erasure)", false,
+			"anchor_id = $1 AND tenant_id = $2", anchorID, tenantID); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, `DELETE FROM memories WHERE anchor_id = $1 AND tenant_id = $2`, anchorID, tenantID)
+		if err != nil {
+			return err
+		}
+		affected = tag.RowsAffected()
+		return nil
+	})
+	return affected, err
 }
 
 func (s *MemoryStore) ListCanon(ctx context.Context, tenantID uuid.UUID, limit int) ([]domain.Memory, error) {
@@ -205,17 +279,25 @@ func (s *MemoryStore) FindCanonByContent(ctx context.Context, tenantID uuid.UUID
 }
 
 func (s *MemoryStore) ArchiveExpiredSessionMemories(ctx context.Context) (int64, error) {
-	tag, err := s.db.Exec(ctx,
-		`UPDATE memories SET is_archived = TRUE, archived_at = NOW(), updated_at = NOW()
-		 WHERE binding = 'session' AND is_archived = FALSE
+	var affected int64
+	err := WithTx(ctx, s.pool, func(tx pgx.Tx) error {
+		const where = `binding = 'session' AND is_archived = FALSE
 		   AND session_id IN (
 		     SELECT id FROM sessions WHERE expires_at IS NOT NULL AND expires_at < NOW()
-		   )`,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return tag.RowsAffected(), nil
+		   )`
+		// Soft archive: content is preserved in the row, so no content snapshot.
+		if err := snapshotMemoriesForRemoval(ctx, tx, domain.MutationArchive, "archive: session expired", false, where); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx,
+			`UPDATE memories SET is_archived = TRUE, archived_at = NOW(), updated_at = NOW() WHERE `+where)
+		if err != nil {
+			return err
+		}
+		affected = tag.RowsAffected()
+		return nil
+	})
+	return affected, err
 }
 
 func (s *MemoryStore) PromoteSessionToAnchor(ctx context.Context, id uuid.UUID) (bool, error) {
@@ -600,24 +682,38 @@ func (s *MemoryStore) ListOldestByAgentAndType(ctx context.Context, agentID uuid
 }
 
 func (s *MemoryStore) DeleteExpired(ctx context.Context) (int64, error) {
-	tag, err := s.db.Exec(ctx,
-		`DELETE FROM memories WHERE expires_at IS NOT NULL AND expires_at < NOW()`,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return tag.RowsAffected(), nil
+	var affected int64
+	err := WithTx(ctx, s.pool, func(tx pgx.Tx) error {
+		const where = "expires_at IS NOT NULL AND expires_at < NOW()"
+		if err := snapshotMemoriesForRemoval(ctx, tx, domain.MutationDeletion, "deletion: ttl expired", true, where); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, `DELETE FROM memories WHERE `+where)
+		if err != nil {
+			return err
+		}
+		affected = tag.RowsAffected()
+		return nil
+	})
+	return affected, err
 }
 
 func (s *MemoryStore) DeleteByRetention(ctx context.Context, agentID uuid.UUID, memType domain.MemoryType, retentionDays int) (int64, error) {
-	tag, err := s.db.Exec(ctx,
-		`DELETE FROM memories WHERE agent_id = $1 AND type = $2 AND created_at < NOW() - ($3 || ' days')::interval`,
-		agentID, memType, fmt.Sprintf("%d", retentionDays),
-	)
-	if err != nil {
-		return 0, err
-	}
-	return tag.RowsAffected(), nil
+	var affected int64
+	err := WithTx(ctx, s.pool, func(tx pgx.Tx) error {
+		const where = "agent_id = $1 AND type = $2 AND created_at < NOW() - ($3 || ' days')::interval"
+		days := fmt.Sprintf("%d", retentionDays)
+		if err := snapshotMemoriesForRemoval(ctx, tx, domain.MutationDeletion, "deletion: retention policy", true, where, agentID, memType, days); err != nil {
+			return err
+		}
+		tag, err := tx.Exec(ctx, `DELETE FROM memories WHERE `+where, agentID, memType, days)
+		if err != nil {
+			return err
+		}
+		affected = tag.RowsAffected()
+		return nil
+	})
+	return affected, err
 }
 
 func (s *MemoryStore) FindSimilar(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, embedding []float32, threshold float32) ([]domain.MemoryWithScore, error) {
@@ -718,6 +814,43 @@ func (s *MemoryStore) UpdateConfidence(ctx context.Context, id uuid.UUID, confid
 	tag, err := s.db.Exec(ctx,
 		`UPDATE memories SET confidence = $1, updated_at = NOW() WHERE id = $2`,
 		confidence, id,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// UpdateContent replaces a memory's content (admin correction). When a new
+// embedding is provided it is updated too; otherwise the existing embedding is
+// left in place.
+func (s *MemoryStore) UpdateContent(ctx context.Context, id uuid.UUID, content string, embedding []float32) error {
+	query := `UPDATE memories SET content = $1, updated_at = NOW() WHERE id = $2`
+	args := []any{content, id}
+	if len(embedding) > 0 {
+		v := pgvector.NewVector(embedding)
+		query = `UPDATE memories SET content = $1, embedding = $2, updated_at = NOW() WHERE id = $3`
+		args = []any{content, v, id}
+	}
+	tag, err := s.db.Exec(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// RedactContent overwrites content with a tombstone and clears the embedding, so
+// neither the original text nor its vector remains recoverable (GDPR redaction).
+func (s *MemoryStore) RedactContent(ctx context.Context, id uuid.UUID, tombstone string) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE memories SET content = $1, embedding = NULL, updated_at = NOW() WHERE id = $2`,
+		tombstone, id,
 	)
 	if err != nil {
 		return err
@@ -920,4 +1053,128 @@ func (s *MemoryStore) GetNeedsReview(ctx context.Context, agentID uuid.UUID, ten
 		memories = append(memories, m)
 	}
 	return memories, rows.Err()
+}
+
+// ListByAgentFiltered lists an agent's memories with optional tier (confidence
+// band), type, and provenance (source) filters, newest-confidence first, plus the
+// total match count for pagination. tier ∈ {hot,warm,cold,archive,""}; memType is a
+// memory_type or ""; provenance ∈ {user,agent,tool,derived,inferred,""}.
+func (s *MemoryStore) ListByAgentFiltered(ctx context.Context, agentID, tenantID uuid.UUID, f domain.MemoryFilter, limit, offset int) ([]domain.Memory, int, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	where := "agent_id = $1 AND tenant_id = $2"
+	args := []any{agentID, tenantID}
+	switch f.Tier {
+	case "hot":
+		where += " AND confidence > 0.85 AND is_archived = FALSE"
+	case "warm":
+		where += " AND confidence > 0.70 AND confidence <= 0.85 AND is_archived = FALSE"
+	case "cold":
+		where += " AND confidence > 0.40 AND confidence <= 0.70 AND is_archived = FALSE"
+	case "archive":
+		where += " AND (confidence <= 0.40 OR is_archived = TRUE)"
+	default:
+		where += " AND is_archived = FALSE"
+	}
+	if f.Type != "" {
+		args = append(args, f.Type)
+		where += fmt.Sprintf(" AND type = $%d", len(args))
+	}
+	if f.Provenance != "" {
+		args = append(args, f.Provenance)
+		where += fmt.Sprintf(" AND provenance = $%d", len(args))
+	}
+	if f.Binding != "" {
+		args = append(args, f.Binding)
+		where += fmt.Sprintf(" AND binding = $%d::memory_binding", len(args))
+	}
+
+	var total int
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM memories WHERE `+where, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	args = append(args, limit, offset)
+	rows, err := s.db.Query(ctx,
+		`SELECT id, agent_id, tenant_id, type, content, embedding_provider, embedding_model, source, provenance, confidence, metadata, expires_at, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at, binding, anchor_id, session_id
+		 FROM memories WHERE `+where+
+			fmt.Sprintf(" ORDER BY confidence DESC, created_at DESC LIMIT $%d OFFSET $%d", len(args)-1, len(args)),
+		args...,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var memories []domain.Memory
+	for rows.Next() {
+		var m domain.Memory
+		if err := rows.Scan(&m.ID, &m.AgentID, &m.TenantID, &m.Type, &m.Content, &m.EmbeddingProvider, &m.EmbeddingModel, &m.Source, &m.Provenance, &m.Confidence, &m.Metadata, &m.ExpiresAt, &m.LastVerifiedAt, &m.ReinforcementCount, &m.DecayRate, &m.LastAccessedAt, &m.AccessCount, &m.CreatedAt, &m.UpdatedAt, &m.Binding, &m.AnchorID, &m.SessionID); err != nil {
+			return nil, 0, err
+		}
+		memories = append(memories, m)
+	}
+	return memories, total, rows.Err()
+}
+
+// BeliefsAsOf reconstructs what the agent believed at instant `at`: for every
+// memory that existed then (created_at <= at), confidence is folded from the
+// audit log — the most recent mutation's new_confidence at/before `at`, else the
+// earliest mutation's old_confidence (the value at creation), else the current
+// confidence (never changed). Returns the top beliefs by reconstructed confidence
+// plus the total count that existed at `at`.
+func (s *MemoryStore) BeliefsAsOf(ctx context.Context, agentID, tenantID uuid.UUID, at time.Time, limit int) ([]domain.BeliefAtTime, int, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	var total int
+	if err := s.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM memories WHERE agent_id = $1 AND tenant_id = $2 AND created_at <= $3`,
+		agentID, tenantID, at,
+	).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	rows, err := s.db.Query(ctx,
+		`SELECT m.id, m.content, m.type,
+		    COALESCE(
+		      (SELECT ml.new_confidence FROM mutation_log ml
+		         WHERE ml.memory_id = m.id AND ml.created_at <= $3 AND ml.new_confidence IS NOT NULL
+		         ORDER BY ml.created_at DESC, ml.seq DESC LIMIT 1),
+		      (SELECT ml.old_confidence FROM mutation_log ml
+		         WHERE ml.memory_id = m.id AND ml.old_confidence IS NOT NULL
+		         ORDER BY ml.created_at ASC, ml.seq ASC LIMIT 1),
+		      m.confidence
+		    )::real AS conf_at_t,
+		    m.created_at
+		 FROM memories m
+		 WHERE m.agent_id = $1 AND m.tenant_id = $2 AND m.created_at <= $3
+		 ORDER BY conf_at_t DESC, m.created_at DESC
+		 LIMIT $4`,
+		agentID, tenantID, at, limit,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []domain.BeliefAtTime
+	for rows.Next() {
+		var b domain.BeliefAtTime
+		if err := rows.Scan(&b.ID, &b.Content, &b.Type, &b.Confidence, &b.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		out = append(out, b)
+	}
+	return out, total, rows.Err()
+}
+
+// CountNeedsReview returns the number of active memories flagged for review.
+func (s *MemoryStore) CountNeedsReview(ctx context.Context, agentID, tenantID uuid.UUID) (int, error) {
+	var n int
+	err := s.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM memories
+		 WHERE agent_id = $1 AND tenant_id = $2 AND needs_review = true AND is_archived = FALSE`,
+		agentID, tenantID,
+	).Scan(&n)
+	return n, err
 }

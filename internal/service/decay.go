@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Harshitk-cp/engram/internal/domain"
+	"github.com/Harshitk-cp/engram/internal/store"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
@@ -61,9 +62,11 @@ type BatchDecayResult struct {
 
 // DecayService implements competition-aware memory decay
 type DecayService struct {
-	memoryStore  domain.MemoryStore
-	episodeStore domain.EpisodeStore
-	logger       *zap.Logger
+	memoryStore      domain.MemoryStore
+	episodeStore     domain.EpisodeStore
+	mutationLogStore domain.MutationLogStore
+	uow              *store.UnitOfWork
+	logger           *zap.Logger
 
 	// Configurable parameters
 	BaseDecayRate     float64
@@ -95,6 +98,80 @@ func NewDecayService(ms domain.MemoryStore, es domain.EpisodeStore, logger *zap.
 // SetInterval sets the decay worker interval
 func (s *DecayService) SetInterval(d time.Duration) {
 	s.interval = d
+}
+
+func (s *DecayService) SetMutationLogStore(mls domain.MutationLogStore) {
+	s.mutationLogStore = mls
+}
+
+func (s *DecayService) SetUnitOfWork(uow *store.UnitOfWork) {
+	s.uow = uow
+}
+
+func buildDecayMutation(mem *domain.Memory, dr *DecayResult, archived bool) *domain.MutationLog {
+	oldConf := dr.OldConfidence
+	newConf := dr.NewConfidence
+	reason := "decay: competition-aware confidence decay"
+	if archived {
+		reason = "decay: archived below confidence floor"
+	}
+
+	return &domain.MutationLog{
+		MemoryID:      mem.ID,
+		AgentID:       mem.AgentID,
+		TenantID:      &mem.TenantID,
+		MutationType:  domain.MutationDecay,
+		SourceType:    domain.MutationSourceSystem,
+		OldConfidence: &oldConf,
+		NewConfidence: &newConf,
+		Reason:        reason,
+		Metadata: map[string]any{
+			"hours_since_access":   dr.HoursSinceAccess,
+			"competitor_count":     dr.CompetitorCount,
+			"effective_decay_rate": dr.EffectiveDecay,
+		},
+	}
+}
+
+// applyDecayWrite persists a memory's decay (archive or confidence update) and its
+// audit row atomically when a unit of work is wired, falling back to non-atomic
+// writes otherwise.
+func (s *DecayService) applyDecayWrite(ctx context.Context, mem *domain.Memory, dr *DecayResult, archived bool) error {
+	mutation := buildDecayMutation(mem, dr, archived)
+
+	stateChange := func(mem domainMemoryWriter) error {
+		if archived {
+			return mem.Archive(ctx, dr.MemoryID)
+		}
+		return mem.UpdateConfidence(ctx, dr.MemoryID, dr.NewConfidence)
+	}
+
+	if s.uow != nil {
+		return s.uow.Do(ctx, func(st *store.TxStores) error {
+			if err := stateChange(st.Memory); err != nil {
+				return err
+			}
+			return st.MutationLog.Create(ctx, mutation)
+		})
+	}
+
+	if err := stateChange(s.memoryStore); err != nil {
+		return err
+	}
+	if s.mutationLogStore != nil {
+		if err := s.mutationLogStore.Create(ctx, mutation); err != nil {
+			s.logger.Debug("failed to log decay mutation",
+				zap.String("memory_id", mem.ID.String()), zap.Error(err))
+		}
+	}
+	return nil
+}
+
+// domainMemoryWriter is the subset of memory-store writes used by decay; both the
+// domain interface and the tx-bound store satisfy it.
+type domainMemoryWriter interface {
+	Archive(ctx context.Context, id uuid.UUID) error
+	UpdateConfidence(ctx context.Context, id uuid.UUID, confidence float32) error
 }
 
 // Start begins the background decay worker
@@ -322,23 +399,16 @@ func (s *DecayService) BatchDecay(ctx context.Context, agentID uuid.UUID) (*Batc
 			})
 		}
 
+		if err := s.applyDecayWrite(ctx, mem, decayResult, decayResult.WasArchived); err != nil {
+			s.logger.Debug("failed to apply decay",
+				zap.String("memory_id", mem.ID.String()),
+				zap.Error(err))
+			result.Errors++
+			continue
+		}
 		if decayResult.WasArchived {
-			if err := s.memoryStore.Archive(ctx, mem.ID); err != nil {
-				s.logger.Debug("failed to archive memory",
-					zap.String("memory_id", mem.ID.String()),
-					zap.Error(err))
-				result.Errors++
-				continue
-			}
 			result.Archived++
 		} else {
-			if err := s.memoryStore.UpdateConfidence(ctx, mem.ID, decayResult.NewConfidence); err != nil {
-				s.logger.Debug("failed to update memory confidence",
-					zap.String("memory_id", mem.ID.String()),
-					zap.Error(err))
-				result.Errors++
-				continue
-			}
 			result.Decayed++
 		}
 	}
@@ -413,17 +483,13 @@ func (s *DecayService) BatchDecayWithDetails(ctx context.Context, agentID uuid.U
 			})
 		}
 
+		if err := s.applyDecayWrite(ctx, mem, decayResult, decayResult.WasArchived); err != nil {
+			result.Errors++
+			continue
+		}
 		if decayResult.WasArchived {
-			if err := s.memoryStore.Archive(ctx, mem.ID); err != nil {
-				result.Errors++
-				continue
-			}
 			result.Archived++
 		} else {
-			if err := s.memoryStore.UpdateConfidence(ctx, mem.ID, decayResult.NewConfidence); err != nil {
-				result.Errors++
-				continue
-			}
 			result.Decayed++
 		}
 	}

@@ -139,6 +139,63 @@ func (m *mockMutationLogStore) GetByAgentID(ctx context.Context, agentID uuid.UU
 	return result, nil
 }
 
+type mockLearningStatsStore struct {
+	last *domain.LearningStats
+}
+
+func (m *mockLearningStatsStore) Upsert(ctx context.Context, s *domain.LearningStats) error {
+	m.last = s
+	return nil
+}
+func (m *mockLearningStatsStore) GetByAgentID(ctx context.Context, agentID uuid.UUID, limit int) ([]domain.LearningStats, error) {
+	return nil, nil
+}
+func (m *mockLearningStatsStore) GetLatest(ctx context.Context, agentID uuid.UUID) (*domain.LearningStats, error) {
+	return m.last, nil
+}
+
+// TestComputeLearningStats_ExcludesNonLearningMutations ensures decay and
+// operator events (deletion/archive/admin_override/redaction) do not move
+// learning_velocity — only genuine learning signals count.
+func TestComputeLearningStats_ExcludesNonLearningMutations(t *testing.T) {
+	agentID := uuid.New()
+	memID := uuid.New()
+	now := time.Now()
+
+	mut := func(mt domain.MutationType, old, newC float32) domain.MutationLog {
+		o, n := old, newC
+		return domain.MutationLog{
+			MemoryID: memID, AgentID: agentID, MutationType: mt,
+			OldConfidence: &o, NewConfidence: &n, CreatedAt: now,
+		}
+	}
+	mutationStore := &mockMutationLogStore{logs: []domain.MutationLog{
+		mut(domain.MutationFeedback, 0.5, 0.7),      // +1 increase (counts)
+		mut(domain.MutationOutcome, 0.7, 0.6),       // +1 decrease (counts)
+		mut(domain.MutationDecay, 0.6, 0.5),         // excluded
+		mut(domain.MutationDeletion, 0.5, 0.0),      // excluded
+		mut(domain.MutationArchive, 0.5, 0.5),       // excluded
+		mut(domain.MutationAdminOverride, 0.5, 0.95), // excluded
+		mut(domain.MutationRedaction, 0.95, 0.0),    // excluded
+	}}
+	statsStore := &mockLearningStatsStore{}
+
+	svc := NewLearningService(newMockMemoryStore(), nil, testLogger())
+	svc.SetMutationLogStore(mutationStore)
+	svc.SetLearningStatsStore(statsStore)
+
+	stats, err := svc.ComputeLearningStats(context.Background(), agentID, now.Add(-time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ComputeLearningStats: %v", err)
+	}
+	if stats.ConfidenceIncreases != 1 {
+		t.Errorf("ConfidenceIncreases = %d, want 1 (only feedback)", stats.ConfidenceIncreases)
+	}
+	if stats.ConfidenceDecreases != 1 {
+		t.Errorf("ConfidenceDecreases = %d, want 1 (only outcome)", stats.ConfidenceDecreases)
+	}
+}
+
 func TestLearningService_RecordOutcome_Success(t *testing.T) {
 	memStore := newMockMemoryStore()
 	logger := testLogger()
