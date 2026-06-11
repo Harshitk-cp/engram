@@ -217,6 +217,37 @@ func WorkOSAuth() (string, string) {
 // recipient can confirm an export came from this server. Empty = unsigned export.
 func AuditSigningKey() string { return os.Getenv("AUDIT_SIGNING_KEY") }
 
+// ---- Billing / managed cloud (Stripe) ----
+
+// StripeSecretKey is the Stripe API secret. When empty, billing is disabled:
+// the checkout/portal/webhook endpoints report "not configured" and quota
+// enforcement is a no-op, so self-hosted/OSS deployments run unmetered.
+func StripeSecretKey() string { return strings.TrimSpace(os.Getenv("STRIPE_SECRET_KEY")) }
+
+// StripeWebhookSecret verifies the signature on incoming Stripe webhook events.
+func StripeWebhookSecret() string { return strings.TrimSpace(os.Getenv("STRIPE_WEBHOOK_SECRET")) }
+
+// BillingEnabled reports whether managed-cloud billing + quota enforcement is on.
+// Gated solely on a Stripe secret being configured.
+func BillingEnabled() bool { return StripeSecretKey() != "" }
+
+// StripePriceIDs maps the self-serve plan names to their Stripe Price IDs,
+// created in the Stripe dashboard. Plans without a configured price can't be
+// purchased via checkout.
+func StripePriceIDs() map[string]string {
+	m := map[string]string{}
+	if v := strings.TrimSpace(os.Getenv("STRIPE_PRICE_DEVELOPER")); v != "" {
+		m["developer"] = v
+	}
+	if v := strings.TrimSpace(os.Getenv("STRIPE_PRICE_TEAM")); v != "" {
+		m["team"] = v
+	}
+	if v := strings.TrimSpace(os.Getenv("STRIPE_PRICE_GROWTH")); v != "" {
+		m["growth"] = v
+	}
+	return m
+}
+
 // LogLevel returns the log level (debug, info, warn, error).
 // Defaults to "info" if not set.
 func LogLevel() string {

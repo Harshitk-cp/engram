@@ -12,6 +12,7 @@ import (
 	"github.com/Harshitk-cp/engram/console"
 	"github.com/Harshitk-cp/engram/internal/api/handlers"
 	mw "github.com/Harshitk-cp/engram/internal/api/middleware"
+	"github.com/Harshitk-cp/engram/internal/billing"
 	"github.com/Harshitk-cp/engram/internal/config"
 	"github.com/Harshitk-cp/engram/internal/domain"
 	"github.com/Harshitk-cp/engram/internal/embedding"
@@ -26,14 +27,14 @@ import (
 
 // App holds the router and background services for lifecycle management.
 type App struct {
-	Router         *chi.Mux
-	Tuner          *service.TunerService
-	Expirer        *service.ExpirerService
-	Decay *service.DecayService
-	Consolidation  *service.ConsolidationService
-	startTime      time.Time
-	requestCount   atomic.Int64
-	errorCount     atomic.Int64
+	Router        *chi.Mux
+	Tuner         *service.TunerService
+	Expirer       *service.ExpirerService
+	Decay         *service.DecayService
+	Consolidation *service.ConsolidationService
+	startTime     time.Time
+	requestCount  atomic.Int64
+	errorCount    atomic.Int64
 }
 
 func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
@@ -136,6 +137,16 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	// Key store
 	apiKeyStore := store.NewAPIKeyStore(db)
 
+	// Billing (managed cloud): per-org plan + usage. Quota enforcement and the
+	// Stripe endpoints activate only when STRIPE_SECRET_KEY is configured; an
+	// unconfigured (self-hosted/OSS) server runs unmetered.
+	billingStore := store.NewBillingStore(db)
+	stripeClient := billing.New(config.StripeSecretKey(), config.StripeWebhookSecret(), config.StripePriceIDs())
+	billingEnabled := config.BillingEnabled()
+	if billingEnabled {
+		logger.Info("billing enabled (Stripe configured) — quotas enforced")
+	}
+
 	// Control plane (console auth): users, social identities, orgs, sessions.
 	userStore := store.NewUserStore(db)
 	oauthStore := store.NewOAuthAccountStore(db)
@@ -165,6 +176,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	adminHandler := handlers.NewAdminHandler(adminSvc)
 	consoleHandler := handlers.NewConsoleHandler(consoleSvc)
 	auditHandler := handlers.NewAuditHandler(mutationLogStore, config.AuditSigningKey())
+	billingHandler := handlers.NewBillingHandler(billingStore, stripeClient, config.AppBaseURL(), logger)
 	mindHandler := handlers.NewMindHandler(memoryStore, episodeStore, procedureStore, schemaStore)
 	tierHandler := handlers.NewTierHandler(memorySvc)
 	graphHandler := handlers.NewGraphHandler(hybridRecallSvc, graphBuilderSvc, graphStore, entityStore)
@@ -176,19 +188,19 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 
 	// Initialize app with metrics tracking
 	app := &App{
-		Router:         r,
-		Tuner:          tunerSvc,
-		Expirer:        expirerSvc,
-		Decay: decaySvc,
-		Consolidation:  consolidationSvc,
-		startTime:      time.Now(),
+		Router:        r,
+		Tuner:         tunerSvc,
+		Expirer:       expirerSvc,
+		Decay:         decaySvc,
+		Consolidation: consolidationSvc,
+		startTime:     time.Now(),
 	}
 
 	// Metrics collector for middleware
 	metricsCollector := mw.NewMetricsCollector(&app.requestCount, &app.errorCount)
 
 	// Global middleware (order matters)
-	r.Use(mw.RequestID)                                                 // Generate/extract request ID first
+	r.Use(mw.RequestID) // Generate/extract request ID first
 	r.Use(mw.CORS(config.CORSAllowedOrigins()))
 	r.Use(middleware.RealIP)                                            // Extract real IP
 	r.Use(metricsCollector.Middleware)                                  // Collect metrics
@@ -218,6 +230,10 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	// Legacy tenant creation (no auth — deprecated, kept for backward compatibility)
 	r.Post("/v1/tenants", tenantHandler.Create)
 
+	// Stripe webhook (no session/key auth — verified by signature). Mounted
+	// outside the /v1 auth group because Stripe calls it directly.
+	r.Post("/v1/billing/webhook", billingHandler.Webhook)
+
 	// Authenticated routes
 	// Control-plane auth routes (public; session cookie based).
 	r.Route("/auth", func(r chi.Router) {
@@ -244,10 +260,19 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 			r.Delete("/{id}", setupHandler.RevokeKey)
 		})
 
+		// Billing (managed cloud). Reads + checkout/portal require admin scope,
+		// which console owners/admins carry. Webhook is mounted separately (no auth).
+		r.Route("/billing", func(r chi.Router) {
+			r.Use(mw.RequireScope("admin"))
+			r.Get("/", billingHandler.Get)
+			r.Post("/checkout", billingHandler.Checkout)
+			r.Post("/portal", billingHandler.Portal)
+		})
+
 		// Agents
 		r.Route("/agents", func(r chi.Router) {
 			r.Get("/", agentHandler.List)
-			r.Post("/", agentHandler.Create)
+			r.With(mw.EnforceAgentQuota(billingStore, billingEnabled)).Post("/", agentHandler.Create)
 			r.Route("/{id}", func(r chi.Router) {
 				r.Get("/", agentHandler.GetByID)
 				r.Delete("/", agentHandler.Delete)
@@ -268,9 +293,9 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 
 		// Memories
 		r.Route("/memories", func(r chi.Router) {
-			r.Get("/recall", memoryHandler.Recall)
+			r.With(mw.MeterRecall(billingStore, billingEnabled)).Get("/recall", memoryHandler.Recall)
 			r.Post("/extract", memoryHandler.Extract)
-			r.Post("/", memoryHandler.Create)
+			r.With(mw.EnforceMemoryQuota(billingStore, billingEnabled)).Post("/", memoryHandler.Create)
 			r.Get("/{id}", memoryHandler.GetByID)
 			r.Delete("/{id}", memoryHandler.Delete)
 			r.With(mw.RequireScope("admin")).Patch("/{id}", adminHandler.UpdateMemory)
@@ -466,6 +491,7 @@ func (app *App) metricsHandler() http.HandlerFunc {
 // Ensure stores and clients satisfy interfaces at compile time.
 var (
 	_ domain.TenantStore             = (*store.TenantStore)(nil)
+	_ domain.BillingStore            = (*store.BillingStore)(nil)
 	_ domain.AgentStore              = (*store.AgentStore)(nil)
 	_ domain.MemoryStore             = (*store.MemoryStore)(nil)
 	_ domain.PolicyStore             = (*store.PolicyStore)(nil)

@@ -13,6 +13,7 @@ import Contradictions from "./pages/Contradictions";
 import Keys from "./pages/Keys";
 import Canon from "./pages/Canon";
 import Audit from "./pages/Audit";
+import Billing from "./pages/Billing";
 import Settings from "./pages/Settings";
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -47,6 +48,7 @@ export default function App() {
       <Route path="/canon" element={protect(<Canon />)} />
       <Route path="/keys" element={protect(<Keys />)} />
       <Route path="/audit" element={protect(<Audit />)} />
+      <Route path="/billing" element={protect(<Billing />)} />
       <Route path="/settings" element={protect(<Settings />)} />
       <Route path="*" element={<Navigate to="/agents" replace />} />
     </Routes>

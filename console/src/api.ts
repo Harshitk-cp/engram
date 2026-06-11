@@ -65,6 +65,13 @@ export interface AuditStatus {
   valid: boolean; checked: number; break_seq?: number | null;
   head_seq: number; head_hash: string; signed: boolean; verified_at: string;
 }
+export interface PlanLimits { max_agents: number; max_memories_per_month: number; price_usd: number; }
+export interface Usage { period_month: string; memories_written: number; recalls: number; }
+export interface PlanOption { plan: string; limits: PlanLimits; purchasable: boolean; }
+export interface BillingState {
+  plan: string; subscription_status: string; limits: PlanLimits;
+  usage: Usage; agent_count: number; billing_enabled: boolean; plans: PlanOption[];
+}
 
 // ---------- Auth ----------
 export const Auth = {
@@ -126,4 +133,10 @@ export const Api = {
   createKey: (name: string, scopes: string[]) =>
     req<ApiKey & { api_key?: string }>("/v1/keys/", { method: "POST", body: JSON.stringify({ name, scopes }) }),
   revokeKey: (id: string) => req<void>(`/v1/keys/${id}`, { method: "DELETE" }),
+
+  // Billing (managed cloud)
+  billing: () => req<BillingState>("/v1/billing/"),
+  checkout: (plan: string) =>
+    req<{ url: string }>("/v1/billing/checkout", { method: "POST", body: JSON.stringify({ plan }) }),
+  billingPortal: () => req<{ url: string }>("/v1/billing/portal", { method: "POST" }),
 };
