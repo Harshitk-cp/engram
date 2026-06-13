@@ -536,3 +536,41 @@ func TestMetacognitiveService_SourceReliability(t *testing.T) {
 		}
 	}
 }
+
+// TestAssessConfidence_NoSaturation proves the metacognition fix: two
+// high-confidence memories that differ in base must produce DISTINCT adjusted
+// confidences. The old multiplicative formula pegged both at the 1.0 ceiling.
+func TestAssessConfidence_NoSaturation(t *testing.T) {
+	svc, _, _, _, _, _, _ := setupMetacognitiveTest()
+	ctx := context.Background()
+	now := time.Now()
+
+	mk := func(base float32) domain.Memory {
+		return domain.Memory{
+			ID:                 uuid.New(),
+			Content:            "x",
+			Type:               domain.MemoryTypePreference,
+			Confidence:         base,
+			LastVerifiedAt:     &now,
+			ReinforcementCount: 5, // strong reinforcement — the old formula saturated here
+			Source:             string(domain.SourceUserStatement),
+		}
+	}
+
+	a, err := svc.AssessConfidence(ctx, mk(0.80))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := svc.AssessConfidence(ctx, mk(0.95))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if a.AdjustedConfidence >= 1.0 || b.AdjustedConfidence >= 1.0 {
+		t.Fatalf("confidence saturated at ceiling: a=%f b=%f", a.AdjustedConfidence, b.AdjustedConfidence)
+	}
+	if b.AdjustedConfidence <= a.AdjustedConfidence {
+		t.Fatalf("expected higher base → higher adjusted (resolution preserved); a(0.80)=%f b(0.95)=%f",
+			a.AdjustedConfidence, b.AdjustedConfidence)
+	}
+}

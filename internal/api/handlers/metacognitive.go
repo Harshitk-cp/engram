@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/Harshitk-cp/engram/internal/api/middleware"
 	"github.com/Harshitk-cp/engram/internal/service"
 	"github.com/google/uuid"
 )
@@ -116,12 +117,13 @@ func (h *MetacognitiveHandler) Reflect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get tenant ID from context
-	tenantID, ok := r.Context().Value("tenant_id").(uuid.UUID)
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "tenant_id not found in context")
+	// Get tenant from context
+	tenant := middleware.TenantFromContext(r.Context())
+	if tenant == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	tenantID := tenant.ID
 
 	result, err := h.metacognitiveService.Reflect(r.Context(), agentID, tenantID, req.Focus)
 	if err != nil {
@@ -265,12 +267,13 @@ func (h *MetacognitiveHandler) AssessConfidence(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Get tenant ID from context
-	tenantID, ok := r.Context().Value("tenant_id").(uuid.UUID)
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "tenant_id not found in context")
+	// Get tenant from context
+	tenant := middleware.TenantFromContext(r.Context())
+	if tenant == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	tenantID := tenant.ID
 
 	explanation, adjustedConfidence, err := h.metacognitiveService.GetConfidenceExplanationForMemory(r.Context(), memoryID, tenantID)
 	if err != nil {
@@ -310,12 +313,13 @@ func (h *MetacognitiveHandler) DetectUncertainty(w http.ResponseWriter, r *http.
 
 	topic := r.URL.Query().Get("topic")
 
-	// Get tenant ID from context
-	tenantID, ok := r.Context().Value("tenant_id").(uuid.UUID)
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "tenant_id not found in context")
+	// Get tenant from context
+	tenant := middleware.TenantFromContext(r.Context())
+	if tenant == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	tenantID := tenant.ID
 
 	result, err := h.metacognitiveService.DetectUncertainty(r.Context(), agentID, tenantID, topic)
 	if err != nil {

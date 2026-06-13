@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -714,4 +715,39 @@ func (m *mockMemoryStoreForSchema) ListByAgentFiltered(ctx context.Context, agen
 
 func (m *mockMemoryStoreForSchema) BeliefsAsOf(ctx context.Context, agentID, tenantID uuid.UUID, at time.Time, limit int) ([]domain.BeliefAtTime, int, error) {
 	return nil, 0, nil
+}
+
+// TestIncrementalMean_EqualWeighting proves the consolidation centroid fix:
+// folding members in one at a time must produce the true equal-weight mean,
+// not a pairwise average that over-weights the last-added member.
+func TestIncrementalMean_EqualWeighting(t *testing.T) {
+	vecs := [][]float32{
+		{0, 0, 0},
+		{3, 6, 9},
+		{6, 6, 6},
+	}
+	// build centroid incrementally the way clusterMemories does
+	centroid := cloneVector(vecs[0])
+	for n := 1; n < len(vecs); n++ {
+		centroid = incrementalMean(centroid, vecs[n], n+1)
+	}
+	want := []float32{3, 4, 5}
+	for i := range want {
+		if math.Abs(float64(centroid[i]-want[i])) > 1e-5 {
+			t.Fatalf("centroid[%d]=%f, want %f (equal weighting violated)", i, centroid[i], want[i])
+		}
+	}
+}
+
+// TestIncrementalMean_DoesNotMutateSeed guards the aliasing fix: the seed
+// embedding must not change when it is used to start a cluster centroid.
+func TestIncrementalMean_DoesNotMutateSeed(t *testing.T) {
+	seed := []float32{1, 2, 3}
+	centroid := cloneVector(seed)
+	_ = incrementalMean(centroid, []float32{9, 9, 9}, 2)
+	for i, v := range []float32{1, 2, 3} {
+		if seed[i] != v {
+			t.Fatalf("seed mutated at %d: got %f want %f", i, seed[i], v)
+		}
+	}
 }

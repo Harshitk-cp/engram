@@ -32,6 +32,9 @@ type engramMock struct {
 	hotMemoriesStatus  int
 	agentsResp         interface{}
 	agentsStatus       int
+	healthResp         interface{}
+	healthStatus       int
+	auditResp          interface{}
 
 	// Request capture
 	lastMethod string
@@ -48,6 +51,7 @@ func newMock(t *testing.T) *engramMock {
 		deleteStatus:       204,
 		hotMemoriesStatus:  200,
 		agentsStatus:       200,
+		healthStatus:       200,
 	}
 }
 
@@ -69,6 +73,10 @@ func (m *engramMock) server() *httptest.Server {
 			w.WriteHeader(m.deleteStatus)
 		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/hot-memories"):
 			write(w, m.hotMemoriesStatus, m.hotMemoriesResp)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/cognitive/health":
+			write(w, m.healthStatus, m.healthResp)
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/audit/verify":
+			write(w, 200, m.auditResp)
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/agents":
 			write(w, m.agentsStatus, m.agentsResp)
 		default:
@@ -556,19 +564,23 @@ func TestResourcesList(t *testing.T) {
 	}
 	_ = json.Unmarshal(data, &result)
 
-	if len(result.Resources) != 2 {
-		t.Errorf("expected 2 resources, got %d", len(result.Resources))
+	if len(result.Resources) != 4 {
+		t.Errorf("expected 4 resources, got %d", len(result.Resources))
 	}
 
 	uris := map[string]bool{}
 	for _, r := range result.Resources {
 		uris[r.URI] = true
 	}
-	if !uris["engram://agents/{agent_id}/memories"] {
-		t.Error("missing memories resource")
-	}
-	if !uris["engram://agents/{agent_id}/health"] {
-		t.Error("missing health resource")
+	for _, want := range []string{
+		"engram://agents/{agent_id}/memories",
+		"engram://agents/{agent_id}/health",
+		"engram://agents/{agent_id}/calibration",
+		"engram://audit/integrity",
+	} {
+		if !uris[want] {
+			t.Errorf("missing resource %s", want)
+		}
 	}
 }
 
@@ -606,11 +618,10 @@ func TestResourcesRead_Memories(t *testing.T) {
 
 func TestResourcesRead_Health(t *testing.T) {
 	mock := newMock(t)
-	mock.hotMemoriesResp = map[string]interface{}{
-		"memories": []interface{}{
-			map[string]interface{}{"id": "m1", "content": "User is a Gopher", "confidence": 0.9},
-			map[string]interface{}{"id": "m2", "content": "User uses Neovim", "confidence": 0.85},
-		},
+	mock.healthResp = map[string]interface{}{
+		"semantic_count":     12,
+		"average_confidence": 0.82,
+		"contradiction_count": 1,
 	}
 	srv := mock.server()
 	defer srv.Close()
@@ -631,8 +642,11 @@ func TestResourcesRead_Health(t *testing.T) {
 	}
 
 	data, _ := json.Marshal(resp.Result)
-	if !strings.Contains(string(data), "agent-77") {
-		t.Errorf("expected agent ID in health response: %s", data)
+	if !strings.Contains(string(data), "average_confidence") {
+		t.Errorf("expected knowledge-health fields in response: %s", data)
+	}
+	if mock.lastPath != "/v1/cognitive/health" {
+		t.Errorf("expected health resource to call /v1/cognitive/health, got %s", mock.lastPath)
 	}
 }
 
@@ -1169,5 +1183,81 @@ func TestServer_NoPanicOnAnyMethod(t *testing.T) {
 			req := &mcp.Request{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: m}
 			s.Handle(context.Background(), req)
 		})
+	}
+}
+
+func TestToolsList_RichSurface(t *testing.T) {
+	mock := newMock(t)
+	srv := mock.server()
+	defer srv.Close()
+	s := newServer(t, mcp.NewClient(srv.URL, "k", "a"))
+
+	req := &mcp.Request{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "tools/list"}
+	resp := s.Handle(context.Background(), req)
+	if resp.Error != nil {
+		t.Fatalf("tools/list error: %v", resp.Error)
+	}
+	data, _ := json.Marshal(resp.Result)
+	var out struct {
+		Tools []struct {
+			Name        string      `json:"name"`
+			Description string      `json:"description"`
+			InputSchema interface{} `json:"inputSchema"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		t.Fatal(err)
+	}
+
+	// Every advertised capability must be present.
+	want := []string{
+		"remember", "recall", "recall_graph", "forget", "get_hot_context", "list_agents",
+		"get_memory", "list_memories", "explain_memory", "restore_memory", "record_feedback",
+		"ingest_conversation", "recall_episodes", "record_episode", "match_procedures",
+		"knowledge_health", "get_calibration", "list_contradictions", "verify_audit",
+		"assess_confidence", "detect_uncertainty", "reflect", "consolidate",
+		"create_anchor", "list_anchors", "forget_subject", "create_session", "end_session",
+		"activate_context", "list_schemas", "match_schemas", "list_entities",
+		"create_agent", "list_canon",
+	}
+	have := map[string]bool{}
+	for _, tl := range out.Tools {
+		have[tl.Name] = true
+		if tl.Description == "" {
+			t.Errorf("tool %s has no description", tl.Name)
+		}
+		if tl.InputSchema == nil {
+			t.Errorf("tool %s has no input schema", tl.Name)
+		}
+	}
+	for _, w := range want {
+		if !have[w] {
+			t.Errorf("expected tool %q to be registered", w)
+		}
+	}
+	if len(out.Tools) < len(want) {
+		t.Errorf("expected >= %d tools, got %d", len(want), len(out.Tools))
+	}
+}
+
+func TestVerifyAuditTool(t *testing.T) {
+	mock := newMock(t)
+	mock.auditResp = map[string]interface{}{"valid": true, "checked": 42, "head_seq": 42}
+	srv := mock.server()
+	defer srv.Close()
+	s := newServer(t, mcp.NewClient(srv.URL, "k", "a"))
+
+	params, _ := json.Marshal(map[string]interface{}{"name": "verify_audit", "arguments": map[string]interface{}{}})
+	req := &mcp.Request{JSONRPC: "2.0", ID: json.RawMessage(`1`), Method: "tools/call", Params: params}
+	resp := s.Handle(context.Background(), req)
+	if resp.Error != nil {
+		t.Fatalf("verify_audit error: %v", resp.Error)
+	}
+	data, _ := json.Marshal(resp.Result)
+	if !strings.Contains(string(data), "\\\"valid\\\": true") && !strings.Contains(string(data), "valid") {
+		t.Errorf("expected audit verification result, got: %s", data)
+	}
+	if mock.lastPath != "/v1/audit/verify" {
+		t.Errorf("expected /v1/audit/verify, got %s", mock.lastPath)
 	}
 }
