@@ -159,11 +159,21 @@ func (s *MetacognitiveService) AssessConfidence(ctx context.Context, memory doma
 	sourceFactor := s.assessSourceReliability(memory.Source)
 	assessment.Factors["source"] = sourceFactor
 
-	// Combined assessment
-	// Formula: base * recency * (1 + reinforcement) * source - contradiction_penalty
-	adjusted := memory.Confidence * recencyFactor * (1 + reinforcementFactor) * sourceFactor - contradictionPenalty
+	// Combined assessment in log-odds space (consistent with the confidence
+	// engine). The previous multiplicative formula
+	//   base * recency * (1+reinforcement) * source - penalty
+	// saturated: with reinforcement up to 1.5x, any base >= ~0.67 hit the 1.0
+	// ceiling and lost all resolution at the top. Working in log-odds keeps the
+	// result a proper probability in (0,1) that stays monotonic in the base and
+	// never artificially pegs at 1.0.
+	logOdds := Logit(float64(memory.Confidence))
+	logOdds += float64(reinforcementFactor)         // 0..MaxReinforcementBonus, positive boost
+	logOdds += math.Log(math.Max(float64(recencyFactor), 0.02)) // staleness penalty (<=0)
+	logOdds += math.Log(float64(sourceFactor))      // source reliability (<=0; user-statement = 0)
+	logOdds -= float64(contradictionPenalty)        // per-contradiction penalty
+	adjusted := float32(Sigmoid(logOdds))
 
-	// Clamp to valid range
+	// Safety clamp (sigmoid is already open on (0,1)).
 	if adjusted < MinAdjustedConfidence {
 		adjusted = MinAdjustedConfidence
 	}

@@ -745,7 +745,7 @@ func (s *ConsolidationService) clusterMemories(memories []domain.Memory) []domai
 		cluster := domain.MemoryCluster{
 			Memories:  []domain.Memory{seed},
 			MemoryIDs: []uuid.UUID{seed.ID},
-			Centroid:  seed.Embedding,
+			Centroid:  cloneVector(seed.Embedding),
 		}
 		assigned[seed.ID] = true
 
@@ -761,8 +761,7 @@ func (s *ConsolidationService) clusterMemories(memories []domain.Memory) []domai
 				cluster.MemoryIDs = append(cluster.MemoryIDs, candidate.ID)
 				assigned[candidate.ID] = true
 
-				// Update centroid (simple average)
-				cluster.Centroid = averageVectors(cluster.Centroid, candidate.Embedding)
+				cluster.Centroid = incrementalMean(cluster.Centroid, candidate.Embedding, len(cluster.Memories))
 			}
 		}
 

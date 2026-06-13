@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -131,7 +132,7 @@ func (s *WorkingMemoryService) Activate(ctx context.Context, input domain.Activa
 
 	// 6. Spreading activation through associations
 	spreadActivations := s.spread(ctx, activations, MaxSpreadingDepth)
-	activations = s.mergeActivations(activations, spreadActivations, SpreadingDecay)
+	activations = s.mergeActivations(activations, spreadActivations, 1.0)
 	s.logger.Debug("after spreading", zap.Int("count", len(activations)))
 
 	// 7. Competition for limited slots (weighted by confidence)
@@ -456,9 +457,9 @@ func (s *WorkingMemoryService) activateRecent(ctx context.Context, agentID, tena
 		episodes, err := s.episodeStore.GetByTimeRange(ctx, agentID, tenantID, cutoff, time.Now())
 		if err == nil {
 			for _, ep := range episodes {
-				// Decay based on age
+				// Exponential recency decay
 				hoursSinceOccurred := time.Since(ep.OccurredAt).Hours()
-				recencyLevel := float32(1.0 - (hoursSinceOccurred * RecencyDecay))
+				recencyLevel := float32(math.Exp(-RecencyDecay * hoursSinceOccurred))
 				if recencyLevel < MinActivationLevel {
 					continue
 				}

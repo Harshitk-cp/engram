@@ -555,3 +555,26 @@ func averageVectors(a, b []float32) []float32 {
 	}
 	return result
 }
+
+// cloneVector returns a copy of v so callers can mutate it without aliasing the
+// source slice.
+func cloneVector(v []float32) []float32 {
+	out := make([]float32, len(v))
+	copy(out, v)
+	return out
+}
+
+// incrementalMean folds sample x into a running mean as the n-th observation:
+// mean += (x - mean) / n. This keeps every cluster member equally weighted,
+// unlike a pairwise average. Returns a new slice; inputs are not mutated.
+func incrementalMean(mean, x []float32, n int) []float32 {
+	if len(mean) != len(x) || n <= 0 {
+		return mean
+	}
+	inv := float32(1) / float32(n)
+	out := make([]float32, len(mean))
+	for i := range mean {
+		out[i] = mean[i] + (x[i]-mean[i])*inv
+	}
+	return out
+}

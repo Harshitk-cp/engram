@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/Harshitk-cp/engram/internal/domain"
@@ -20,12 +21,18 @@ const (
 
 type AnthropicClient struct {
 	apiKey     string
+	model      string
 	httpClient *http.Client
 }
 
 func NewAnthropicClient(apiKey string) *AnthropicClient {
+	model := strings.TrimSpace(os.Getenv("ANTHROPIC_MODEL"))
+	if model == "" {
+		model = anthropicModel
+	}
 	return &AnthropicClient{
 		apiKey:     apiKey,
+		model:      model,
 		httpClient: &http.Client{},
 	}
 }
@@ -54,7 +61,7 @@ type anthropicResponse struct {
 
 func (c *AnthropicClient) complete(ctx context.Context, messages []anthropicMessage, maxTokens int) (string, error) {
 	body, err := json.Marshal(anthropicRequest{
-		Model:     anthropicModel,
+		Model:     c.model,
 		MaxTokens: maxTokens,
 		Messages:  messages,
 	})
