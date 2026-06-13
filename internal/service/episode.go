@@ -371,7 +371,7 @@ func (s *EpisodeService) RecordOutcome(ctx context.Context, id uuid.UUID, tenant
 		return err
 	}
 
-	return s.episodeStore.UpdateOutcome(ctx, id, outcome, description)
+	return s.episodeStore.UpdateOutcome(ctx, id, tenantID, outcome, description)
 }
 
 // GetByConversationID retrieves all episodes for a conversation.

@@ -6,9 +6,10 @@
 //
 // Environment variables:
 //
-//	ENGRAM_API_URL   Engram server URL (default: http://localhost:8080)
-//	ENGRAM_API_KEY   API key (mk_... or rk_...)
-//	ENGRAM_AGENT_ID  Default agent ID used when a tool call omits agent_id
+//	ENGRAM_API_URL    Engram server URL (default: http://localhost:8080)
+//	ENGRAM_API_KEY    API key (mk_... or rk_...)
+//	ENGRAM_AGENT_ID   Default agent ID used when a tool call omits agent_id
+//	ENGRAM_MCP_TOKEN  Bearer token required on the sse/http transports.
 //
 // Claude Desktop config (~/.claude/claude_desktop_config.json):
 //
@@ -34,6 +35,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/Harshitk-cp/engram/mcp"
 	"github.com/Harshitk-cp/engram/mcp/transports"
@@ -41,7 +43,7 @@ import (
 
 func main() {
 	transport := flag.String("transport", "stdio", "Transport: stdio, sse, or http")
-	addr := flag.String("addr", ":3742", "Listen address for sse and http transports")
+	addr := flag.String("addr", "127.0.0.1:3742", "Listen address for sse and http transports")
 	flag.Parse()
 
 	apiURL := envOr("ENGRAM_API_URL", "http://localhost:8080")
@@ -71,14 +73,14 @@ func main() {
 	case "sse":
 		sseServer := transports.NewSSEServer(server)
 		log.Printf("engram-mcp SSE transport listening on %s", *addr)
-		if err := http.ListenAndServe(*addr, sseServer.Handler()); err != nil {
+		if err := serveNetwork(*addr, sseServer.Handler()); err != nil {
 			log.Fatalf("SSE server error: %v", err)
 		}
 
 	case "http":
 		httpServer := transports.NewHTTPServer(server)
 		log.Printf("engram-mcp HTTP transport listening on %s", *addr)
-		if err := http.ListenAndServe(*addr, httpServer.Handler()); err != nil {
+		if err := serveNetwork(*addr, httpServer.Handler()); err != nil {
 			log.Fatalf("HTTP server error: %v", err)
 		}
 
@@ -86,6 +88,21 @@ func main() {
 		fmt.Fprintf(os.Stderr, "unknown transport %q — use stdio, sse, or http\n", *transport)
 		os.Exit(1)
 	}
+}
+
+// serveNetwork starts an HTTP listener for the sse/http transports.
+func serveNetwork(addr string, handler http.Handler) error {
+	token := os.Getenv("ENGRAM_MCP_TOKEN")
+	if token == "" && !transports.IsLoopbackAddr(addr) {
+		log.Fatalf("refusing to listen on %q without ENGRAM_MCP_TOKEN: the transport exposes the configured API key to anyone who can reach it (bind 127.0.0.1 or set a token)", addr)
+	}
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           transports.Guard(handler, token),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	return srv.ListenAndServe()
 }
 
 func envOr(key, fallback string) string {

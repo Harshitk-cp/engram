@@ -130,6 +130,7 @@ func (d *ImplicitFeedbackDetector) DetectAndApply(ctx context.Context, req Detec
 			mutation := &domain.MutationLog{
 				MemoryID:              memory.ID,
 				AgentID:               req.AgentID,
+				TenantID:              &memory.TenantID,
 				MutationType:          domain.MutationFeedback,
 				SourceType:            domain.MutationSourceImplicit,
 				SourceID:              &feedback.ID,

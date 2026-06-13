@@ -21,13 +21,13 @@ func NewEntityStore(db *pgxpool.Pool) *EntityStore {
 
 func (s *EntityStore) Create(ctx context.Context, e *domain.Entity) error {
 	return s.db.QueryRow(ctx,
-		`INSERT INTO entities (agent_id, name, entity_type, aliases, metadata)
-		 VALUES ($1, $2, $3, $4, $5)
+		`INSERT INTO entities (agent_id, tenant_id, name, entity_type, aliases, metadata)
+		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT (agent_id, name, entity_type) DO UPDATE
 		 SET aliases = ARRAY(SELECT DISTINCT unnest(entities.aliases || EXCLUDED.aliases)),
 		     updated_at = NOW()
 		 RETURNING id, created_at, updated_at`,
-		e.AgentID, e.Name, e.EntityType, e.Aliases, e.Metadata,
+		e.AgentID, e.TenantID, e.Name, e.EntityType, e.Aliases, e.Metadata,
 	).Scan(&e.ID, &e.CreatedAt, &e.UpdatedAt)
 }
 

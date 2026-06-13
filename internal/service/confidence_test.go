@@ -121,7 +121,7 @@ func (m *mockMemoryStoreForConfidence) Archive(ctx context.Context, id uuid.UUID
 	return nil
 }
 
-func (m *mockMemoryStoreForConfidence) Restore(ctx context.Context, id uuid.UUID) error {
+func (m *mockMemoryStoreForConfidence) Restore(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error {
 	return nil
 }
 

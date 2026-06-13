@@ -75,9 +75,10 @@ type DecayService struct {
 	CompetitionWeight float64
 
 	// Background worker
-	interval time.Duration
-	stopCh   chan struct{}
-	wg       sync.WaitGroup
+	interval   time.Duration
+	stopCh     chan struct{}
+	cancelRuns context.CancelFunc
+	wg         sync.WaitGroup
 }
 
 // NewDecayService creates a new decay service
@@ -176,6 +177,8 @@ type domainMemoryWriter interface {
 
 // Start begins the background decay worker
 func (s *DecayService) Start() {
+	baseCtx, cancel := context.WithCancel(context.Background())
+	s.cancelRuns = cancel
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -187,9 +190,9 @@ func (s *DecayService) Start() {
 		for {
 			select {
 			case <-ticker.C:
-				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-				s.runDecayAllAgents(ctx)
-				cancel()
+				ctx, tickCancel := context.WithTimeout(baseCtx, 10*time.Minute)
+				guardPanic(s.logger, "decay tick", func() { s.runDecayAllAgents(ctx) })
+				tickCancel()
 			case <-s.stopCh:
 				s.logger.Info("decay worker stopped")
 				return
@@ -198,8 +201,12 @@ func (s *DecayService) Start() {
 	}()
 }
 
-// Stop halts the background decay worker
+// Stop halts the background decay worker, cancelling any in-flight pass so
+// shutdown is not held for the remainder of a long tick.
 func (s *DecayService) Stop() {
+	if s.cancelRuns != nil {
+		s.cancelRuns()
+	}
 	close(s.stopCh)
 	s.wg.Wait()
 }
@@ -213,11 +220,21 @@ func (s *DecayService) runDecayAllAgents(ctx context.Context) {
 	}
 
 	for _, agentID := range agentIDs {
-		result, err := s.BatchDecay(ctx, agentID)
+		if ctx.Err() != nil {
+			return
+		}
+		var result *BatchDecayResult
+		var err error
+		guardPanic(s.logger, "decay agent "+agentID.String(), func() {
+			result, err = s.BatchDecay(ctx, agentID)
+		})
 		if err != nil {
 			s.logger.Error("decay failed for agent",
 				zap.String("agent_id", agentID.String()),
 				zap.Error(err))
+			continue
+		}
+		if result == nil { // tick panicked for this agent; already logged
 			continue
 		}
 

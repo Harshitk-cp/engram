@@ -49,7 +49,7 @@ func (h *SetupHandler) Bootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.Header.Get("X-Setup-Token") != h.setupToken {
+	if !tokenMatches(r.Header.Get("X-Setup-Token"), h.setupToken) {
 		writeError(w, http.StatusForbidden, "invalid setup token")
 		return
 	}

@@ -170,7 +170,7 @@ func (m *mockMemoryStore) Archive(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-func (m *mockMemoryStore) Restore(ctx context.Context, id uuid.UUID) error {
+func (m *mockMemoryStore) Restore(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error {
 	if _, ok := m.memories[id]; !ok {
 		return store.ErrNotFound
 	}

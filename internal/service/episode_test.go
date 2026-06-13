@@ -179,7 +179,7 @@ func (m *mockEpisodeStore) RecordAccess(ctx context.Context, id uuid.UUID) error
 	return nil
 }
 
-func (m *mockEpisodeStore) UpdateOutcome(ctx context.Context, id uuid.UUID, outcome domain.OutcomeType, description string) error {
+func (m *mockEpisodeStore) UpdateOutcome(ctx context.Context, id uuid.UUID, tenantID uuid.UUID, outcome domain.OutcomeType, description string) error {
 	e, ok := m.episodes[id]
 	if !ok {
 		return store.ErrNotFound

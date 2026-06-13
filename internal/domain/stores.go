@@ -118,7 +118,7 @@ type MemoryStore interface {
 	ListDistinctAgentIDs(ctx context.Context) ([]uuid.UUID, error)
 	GetByAgentForDecay(ctx context.Context, agentID uuid.UUID) ([]Memory, error)
 	Archive(ctx context.Context, id uuid.UUID) error
-	Restore(ctx context.Context, id uuid.UUID) error
+	Restore(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error
 	GetByIDOnly(ctx context.Context, id uuid.UUID) (*Memory, error)
 	IncrementAccessAndBoost(ctx context.Context, id uuid.UUID, boost float32) error
 	// Tier methods
@@ -274,7 +274,7 @@ type EpisodeStore interface {
 	RecordAccess(ctx context.Context, id uuid.UUID) error
 
 	// Outcome
-	UpdateOutcome(ctx context.Context, id uuid.UUID, outcome OutcomeType, description string) error
+	UpdateOutcome(ctx context.Context, id uuid.UUID, tenantID uuid.UUID, outcome OutcomeType, description string) error
 
 	// Associations
 	CreateAssociation(ctx context.Context, a *EpisodeAssociation) error
@@ -369,8 +369,9 @@ type MemoryAssociationStore interface {
 // MutationLogStore handles logging of all memory mutations for explainability.
 type MutationLogStore interface {
 	Create(ctx context.Context, m *MutationLog) error
-	GetByMemoryID(ctx context.Context, memoryID uuid.UUID, limit int) ([]MutationLog, error)
+	GetByMemoryID(ctx context.Context, memoryID uuid.UUID, tenantID uuid.UUID, limit int) ([]MutationLog, error)
 	GetByAgentID(ctx context.Context, agentID uuid.UUID, since time.Time, limit int) ([]MutationLog, error)
+	CalibrationSamples(ctx context.Context, tenantID uuid.UUID, agentID *uuid.UUID) ([]CalibrationSample, error)
 }
 
 // EpisodeMemoryUsageStore tracks which memories were used per episode.

@@ -94,11 +94,15 @@ func (s *Server) AddResource(resource Resource, uriTemplate string, handler Reso
 // Handle dispatches a JSON-RPC request and returns the response.
 // Returns nil for notifications (no ID) that require no response.
 func (s *Server) Handle(ctx context.Context, req *Request) *Response {
+	if req.IsNotification() {
+		return nil
+	}
+
 	switch req.Method {
 	case "initialize":
 		return s.handleInitialize(req)
 	case "notifications/initialized", "notifications/cancelled":
-		return nil // notifications require no response
+		return newResponse(req.ID, map[string]interface{}{})
 	case "tools/list":
 		return s.handleToolsList(req)
 	case "tools/call":

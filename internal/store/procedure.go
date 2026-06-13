@@ -267,7 +267,8 @@ func (s *ProcedureStore) GetByAgentForDecay(ctx context.Context, agentID uuid.UU
 			created_at, updated_at
 		FROM procedures
 		WHERE agent_id = $1 AND memory_strength > 0
-		ORDER BY last_used_at ASC NULLS FIRST`,
+		ORDER BY last_used_at ASC NULLS FIRST
+		LIMIT 10000`,
 		agentID,
 	)
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/Harshitk-cp/engram/internal/api/middleware"
+	"github.com/Harshitk-cp/engram/internal/domain"
 	"github.com/Harshitk-cp/engram/internal/service"
 	"github.com/google/uuid"
 )
@@ -13,14 +14,56 @@ type CognitiveHandler struct {
 	decayService         *service.DecayService
 	consolidationService *service.ConsolidationService
 	confidenceService    *service.ConfidenceService
+	calibrationService   *service.CalibrationService
+	agentStore           domain.AgentStore
 }
 
-func NewCognitiveHandler(ds *service.DecayService, cs *service.ConsolidationService) *CognitiveHandler {
-	return &CognitiveHandler{decayService: ds, consolidationService: cs}
+func NewCognitiveHandler(ds *service.DecayService, cs *service.ConsolidationService, as domain.AgentStore) *CognitiveHandler {
+	return &CognitiveHandler{decayService: ds, consolidationService: cs, agentStore: as}
 }
 
 func (h *CognitiveHandler) SetConfidenceService(cs *service.ConfidenceService) {
 	h.confidenceService = cs
+}
+
+func (h *CognitiveHandler) SetCalibrationService(cs *service.CalibrationService) {
+	h.calibrationService = cs
+}
+
+func (h *CognitiveHandler) GetCalibration(w http.ResponseWriter, r *http.Request) {
+	if h.calibrationService == nil {
+		writeError(w, http.StatusServiceUnavailable, "calibration service not available")
+		return
+	}
+
+	tenant := middleware.TenantFromContext(r.Context())
+	if tenant == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var agentID *uuid.UUID
+	if s := r.URL.Query().Get("agent_id"); s != "" {
+		id, err := uuid.Parse(s)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid agent_id format")
+			return
+		}
+		if !requireAgentInTenant(w, r, h.agentStore, id, tenant.ID) {
+			return
+		}
+		agentID = &id
+	}
+
+	report, err := h.calibrationService.Report(r.Context(), tenant.ID, agentID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(report)
 }
 
 type triggerDecayRequest struct {
@@ -52,9 +95,19 @@ func (h *CognitiveHandler) TriggerDecay(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	tenant := middleware.TenantFromContext(r.Context())
+	if tenant == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	if !requireAgentInTenant(w, r, h.agentStore, agentID, tenant.ID) {
+		return
+	}
+
 	result, err := h.decayService.RunDecayForAgent(r.Context(), agentID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "decay run failed")
 		return
 	}
 
@@ -120,6 +173,10 @@ func (h *CognitiveHandler) TriggerConsolidation(w http.ResponseWriter, r *http.R
 		return
 	}
 	tenantID := tenant.ID
+
+	if !requireAgentInTenant(w, r, h.agentStore, agentID, tenantID) {
+		return
+	}
 
 	scope := service.ConsolidationScopeRecent
 	if req.Scope == "full" {
@@ -190,6 +247,10 @@ func (h *CognitiveHandler) GetMemoryHealth(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	tenantID := tenant.ID
+
+	if !requireAgentInTenant(w, r, h.agentStore, agentID, tenantID) {
+		return
+	}
 
 	stats, err := h.consolidationService.GetMemoryHealth(r.Context(), agentID, tenantID)
 	if err != nil {

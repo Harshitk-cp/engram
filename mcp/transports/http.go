@@ -1,7 +1,6 @@
 package transports
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 
@@ -41,7 +40,7 @@ func (s *HTTPServer) handleMCP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req mcp.Request
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
 		resp := mcp.Response{
 			JSONRPC: "2.0",
 			Error:   &mcp.RPCError{Code: -32700, Message: "parse error"},
@@ -52,7 +51,7 @@ func (s *HTTPServer) handleMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := s.server.Handle(context.Background(), &req)
+	resp := s.server.Handle(r.Context(), &req)
 	if resp == nil {
 		// Notification: return 204
 		w.WriteHeader(http.StatusNoContent)

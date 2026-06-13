@@ -231,7 +231,7 @@ func (m *mockMemoryStoreForSchema) Archive(ctx context.Context, id uuid.UUID) er
 	return nil
 }
 
-func (m *mockMemoryStoreForSchema) Restore(ctx context.Context, id uuid.UUID) error {
+func (m *mockMemoryStoreForSchema) Restore(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error {
 	return nil
 }
 

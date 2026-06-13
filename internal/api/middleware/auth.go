@@ -128,6 +128,25 @@ func RequireScope(scope string) func(http.Handler) http.Handler {
 	}
 }
 
+// RequireWriteForMutations enforces the "write" scope on any state-changing
+// request (POST/PUT/PATCH/DELETE) while leaving safe, read-only methods
+// (GET/HEAD/OPTIONS) open to read-scoped keys.
+func RequireWriteForMutations(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			next.ServeHTTP(w, r)
+			return
+		}
+		auth := AuthFromContext(r.Context())
+		if auth == nil || !auth.HasScope("write") {
+			writeError(w, http.StatusForbidden, "insufficient scope: write required")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // HashAPIKey returns the SHA-256 hex digest of the given key.
 func HashAPIKey(key string) string {
 	h := sha256.Sum256([]byte(key))

@@ -99,17 +99,20 @@ const (
 	SessionPromotionThreshold = 3
 )
 
-func sameAnchorCandidates(candidates []domain.MemoryWithScore, anchorID *uuid.UUID) []domain.MemoryWithScore {
+func sameScopeCandidates(candidates []domain.MemoryWithScore, m *domain.Memory) []domain.MemoryWithScore {
 	out := candidates[:0]
 	for _, c := range candidates {
-		if sameAnchor(c.AnchorID, anchorID) {
+		if sameUUIDPtr(c.AnchorID, m.AnchorID) && sameUUIDPtr(c.SessionID, m.SessionID) {
 			out = append(out, c)
 		}
 	}
 	return out
 }
 
-func sameAnchor(a, b *uuid.UUID) bool {
+// sameUUIDPtr treats two NULLs as equal but a NULL never equal to a value, so
+// two distinct anonymous sessions (both anchor NULL, different session IDs)
+// are different scopes and never reinforce or supersede each other.
+func sameUUIDPtr(a, b *uuid.UUID) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
@@ -141,11 +144,18 @@ type MemoryService struct {
 }
 
 func NewMemoryService(ms domain.MemoryStore, as domain.AgentStore, ec domain.EmbeddingClient, lc domain.LLMClient, logger *zap.Logger) *MemoryService {
+	// Detector selection (CONTRADICTION_MODE: hybrid|llm|embedding).
+	// Default is hybrid when an LLM is available: embedding-first with LLM
+	// escalation only on ambiguous cases — near-LLM accuracy at ~30% of the
+	// LLM calls. Without an LLM we fall back to the pure embedding detector.
 	var detector contradiction.Detector
-	if lc != nil && os.Getenv("CONTRADICTION_MODE") != "embedding" {
-		detector = contradiction.NewLLMDetector(lc)
-	} else {
+	switch {
+	case lc == nil || os.Getenv("CONTRADICTION_MODE") == "embedding":
 		detector = contradiction.NewEmbeddingDetector()
+	case os.Getenv("CONTRADICTION_MODE") == "llm":
+		detector = contradiction.NewLLMDetector(lc)
+	default:
+		detector = contradiction.NewHybridDetector(lc)
 	}
 
 	svc := &MemoryService{
@@ -354,7 +364,7 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 			}
 		}
 
-		similar = sameAnchorCandidates(similar, m.AnchorID)
+		similar = sameScopeCandidates(similar, m)
 
 		if len(similar) > 0 {
 			s.logger.Info("contradiction candidates found", zap.Int("count", len(similar)))
@@ -472,8 +482,8 @@ func (s *MemoryService) Delete(ctx context.Context, id uuid.UUID, tenantID uuid.
 	return nil
 }
 
-func (s *MemoryService) Restore(ctx context.Context, id uuid.UUID) error {
-	err := s.memoryStore.Restore(ctx, id)
+func (s *MemoryService) Restore(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error {
+	err := s.memoryStore.Restore(ctx, id, tenantID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return ErrMemoryNotFound

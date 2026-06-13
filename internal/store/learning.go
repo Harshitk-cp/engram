@@ -49,17 +49,54 @@ func nullIfEmpty(s string) *string {
 	return &s
 }
 
-func (s *MutationLogStore) GetByMemoryID(ctx context.Context, memoryID uuid.UUID, limit int) ([]domain.MutationLog, error) {
+// CalibrationSamples returns labeled (predicted-confidence, outcome) pairs
+// drawn from evidence events: feedback, outcome, and contradiction mutations
+// that carry both the pre-event confidence and a post-event confidence. The
+// label is the sign of the confidence change — evidence that raised (or held)
+// confidence confirmed the belief; evidence that lowered it refuted the belief.
+// Optionally scoped to one agent. Decay/reinforcement-by-disuse and system
+// housekeeping are excluded because they are not external evidence.
+func (s *MutationLogStore) CalibrationSamples(ctx context.Context, tenantID uuid.UUID, agentID *uuid.UUID) ([]domain.CalibrationSample, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT old_confidence, new_confidence
+		   FROM mutation_log
+		  WHERE tenant_id = $1
+		    AND ($2::uuid IS NULL OR agent_id = $2)
+		    AND mutation_type IN ('feedback', 'outcome', 'contradiction')
+		    AND old_confidence IS NOT NULL
+		    AND new_confidence IS NOT NULL`,
+		tenantID, agentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.CalibrationSample
+	for rows.Next() {
+		var oldConf, newConf float32
+		if err := rows.Scan(&oldConf, &newConf); err != nil {
+			return nil, err
+		}
+		out = append(out, domain.CalibrationSample{
+			Confidence: float64(oldConf),
+			Correct:    newConf >= oldConf,
+		})
+	}
+	return out, rows.Err()
+}
+
+func (s *MutationLogStore) GetByMemoryID(ctx context.Context, memoryID uuid.UUID, tenantID uuid.UUID, limit int) ([]domain.MutationLog, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 
 	rows, err := s.db.Query(ctx,
 		`SELECT id, memory_id, agent_id, mutation_type, source_type, source_id, old_confidence, new_confidence, old_reinforcement_count, new_reinforcement_count, reason, metadata, created_at
-		 FROM mutation_log WHERE memory_id = $1
+		 FROM mutation_log WHERE memory_id = $1 AND tenant_id = $2
 		 ORDER BY created_at DESC
-		 LIMIT $2`,
-		memoryID, limit,
+		 LIMIT $3`,
+		memoryID, tenantID, limit,
 	)
 	if err != nil {
 		return nil, err
@@ -106,12 +143,14 @@ func (s *MutationLogStore) GetByAgentID(ctx context.Context, agentID uuid.UUID, 
 }
 
 // VerifyChain walks the tenant's audit hash chain in the DB and reports whether
-// it is intact, how many rows verified, and the first broken seq (nil if intact).
-func (s *MutationLogStore) VerifyChain(ctx context.Context, tenantID uuid.UUID) (valid bool, checked int64, breakSeq *int64, err error) {
+// it is intact, how many rows verified, the first broken seq (nil if intact),
+// and a human-readable reason when broken. The DB function also cross-checks
+// the walked chain against audit_chain_heads, so tail truncation fails too.
+func (s *MutationLogStore) VerifyChain(ctx context.Context, tenantID uuid.UUID) (valid bool, checked int64, breakSeq *int64, reason *string, err error) {
 	err = s.db.QueryRow(ctx,
-		`SELECT valid, checked, break_seq FROM verify_audit_chain($1)`, tenantID,
-	).Scan(&valid, &checked, &breakSeq)
-	return valid, checked, breakSeq, err
+		`SELECT valid, checked, break_seq, reason FROM verify_audit_chain($1)`, tenantID,
+	).Scan(&valid, &checked, &breakSeq, &reason)
+	return valid, checked, breakSeq, reason, err
 }
 
 // ChainHead returns the tenant's current chain length and head hash (the value an

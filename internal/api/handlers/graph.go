@@ -16,6 +16,8 @@ type GraphHandler struct {
 	graphSvc  *service.GraphBuilderService
 	graphStore domain.GraphStore
 	entityStore domain.EntityStore
+	agentStore  domain.AgentStore
+	memoryStore domain.MemoryStore
 }
 
 func NewGraphHandler(
@@ -23,12 +25,16 @@ func NewGraphHandler(
 	graphSvc *service.GraphBuilderService,
 	graphStore domain.GraphStore,
 	entityStore domain.EntityStore,
+	agentStore domain.AgentStore,
+	memoryStore domain.MemoryStore,
 ) *GraphHandler {
 	return &GraphHandler{
 		hybridSvc:   hybridSvc,
 		graphSvc:    graphSvc,
 		graphStore:  graphStore,
 		entityStore: entityStore,
+		agentStore:  agentStore,
+		memoryStore: memoryStore,
 	}
 }
 
@@ -61,6 +67,11 @@ func (h *GraphHandler) ListEntities(w http.ResponseWriter, r *http.Request) {
 	agentID, err := uuid.Parse(agentIDStr)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid agent_id")
+		return
+	}
+
+	// Entity reads below are agent-scoped
+	if !requireAgentInTenant(w, r, h.agentStore, agentID, tenant.ID) {
 		return
 	}
 
@@ -126,6 +137,10 @@ func (h *GraphHandler) GetRelationships(w http.ResponseWriter, r *http.Request) 
 		if d, err := strconv.Atoi(depthStr); err == nil && d > 0 && d <= 3 {
 			depth = d
 		}
+	}
+
+	if !requireMemoryInTenant(w, r, h.memoryStore, memoryID, tenant.ID) {
+		return
 	}
 
 	// Get direct relationships
@@ -243,7 +258,15 @@ func (h *GraphHandler) Traverse(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
+		if mem, err := h.memoryStore.GetByID(r.Context(), id, tenant.ID); err != nil || mem == nil {
+			continue
+		}
 		startIDs = append(startIDs, id)
+	}
+
+	if len(startIDs) == 0 {
+		writeError(w, http.StatusNotFound, "no start memories found")
+		return
 	}
 
 	var relationTypes []domain.RelationType

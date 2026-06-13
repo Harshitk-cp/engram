@@ -82,6 +82,7 @@ type ConsolidationService struct {
 	// Background worker fields
 	interval time.Duration
 	stopCh   chan struct{}
+	cancelRuns context.CancelFunc
 	wg       sync.WaitGroup
 }
 
@@ -128,6 +129,8 @@ func (s *ConsolidationService) SetGraphStore(gs domain.GraphStore) {
 
 // Start begins the background consolidation worker.
 func (s *ConsolidationService) Start() {
+	baseCtx, cancel := context.WithCancel(context.Background())
+	s.cancelRuns = cancel
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -139,9 +142,9 @@ func (s *ConsolidationService) Start() {
 		for {
 			select {
 			case <-ticker.C:
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-				s.runConsolidation(ctx)
-				cancel()
+				ctx, tickCancel := context.WithTimeout(baseCtx, 30*time.Minute)
+				guardPanic(s.logger, "consolidation tick", func() { s.runConsolidation(ctx) })
+				tickCancel()
 			case <-s.stopCh:
 				s.logger.Info("consolidation worker stopped")
 				return
@@ -150,8 +153,12 @@ func (s *ConsolidationService) Start() {
 	}()
 }
 
-// Stop halts the background consolidation worker.
+// Stop halts the background consolidation worker, cancelling any in-flight
+// pass so shutdown is not held for the remainder of a long tick.
 func (s *ConsolidationService) Stop() {
+	if s.cancelRuns != nil {
+		s.cancelRuns()
+	}
 	close(s.stopCh)
 	s.wg.Wait()
 }
@@ -165,6 +172,9 @@ func (s *ConsolidationService) runConsolidation(ctx context.Context) {
 	}
 
 	for _, agentID := range agents {
+		if ctx.Err() != nil {
+			return
+		}
 		// Get tenant ID for this agent - we need it from the memory store
 		tenantID, err := s.getTenantForAgent(ctx, agentID)
 		if err != nil {
@@ -172,11 +182,17 @@ func (s *ConsolidationService) runConsolidation(ctx context.Context) {
 			continue
 		}
 
-		result, err := s.Consolidate(ctx, agentID, tenantID, ConsolidationScopeRecent)
+		var result *ConsolidationResult
+		guardPanic(s.logger, "consolidation agent "+agentID.String(), func() {
+			result, err = s.Consolidate(ctx, agentID, tenantID, ConsolidationScopeRecent)
+		})
 		if err != nil {
 			s.logger.Error("consolidation failed",
 				zap.String("agent_id", agentID.String()),
 				zap.Error(err))
+			continue
+		}
+		if result == nil { // tick panicked for this agent; already logged
 			continue
 		}
 
@@ -987,8 +1003,9 @@ func (s *ConsolidationService) GetMemoryHealth(ctx context.Context, agentID uuid
 
 	// Count contradictions
 	if s.contradictionStore != nil {
-		// Would need a count method in the store
-		stats.ContradictionCount = 0
+		if n, err := s.contradictionStore.CountByAgent(ctx, agentID, tenantID); err == nil {
+			stats.ContradictionCount = n
+		}
 	}
 
 	return stats, nil

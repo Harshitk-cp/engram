@@ -156,7 +156,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	authSvc := service.NewAuthService(userStore, oauthStore, membershipStore, consoleSessionStore, tenantStore, config.DefaultTenantID(), config.DefaultTenantRole(), sessionTTL, logger)
 
 	// Handlers
-	tenantHandler := handlers.NewTenantHandler(tenantStore, apiKeyStore)
+	tenantHandler := handlers.NewTenantHandler(tenantStore, apiKeyStore, config.SetupToken())
 	setupHandler := handlers.NewSetupHandler(tenantStore, apiKeyStore, config.SetupToken())
 	authHandler := handlers.NewAuthHandler(authSvc, sessionTTL)
 	agentHandler := handlers.NewAgentHandler(agentSvc)
@@ -170,17 +170,18 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	procedureHandler := handlers.NewProcedureHandler(proceduralSvc)
 	schemaHandler := handlers.NewSchemaHandler(schemaSvc)
 	wmHandler := handlers.NewWorkingMemoryHandler(wmSvc)
-	cognitiveHandler := handlers.NewCognitiveHandler(decaySvc, consolidationSvc)
+	cognitiveHandler := handlers.NewCognitiveHandler(decaySvc, consolidationSvc, agentStore)
 	cognitiveHandler.SetConfidenceService(confidenceSvc)
+	cognitiveHandler.SetCalibrationService(service.NewCalibrationService(mutationLogStore, logger))
 	metacognitiveHandler := handlers.NewMetacognitiveHandler(metacognitiveSvc)
 	adminHandler := handlers.NewAdminHandler(adminSvc)
 	consoleHandler := handlers.NewConsoleHandler(consoleSvc)
 	auditHandler := handlers.NewAuditHandler(mutationLogStore, config.AuditSigningKey())
 	billingHandler := handlers.NewBillingHandler(billingStore, stripeClient, config.AppBaseURL(), logger)
-	mindHandler := handlers.NewMindHandler(memoryStore, episodeStore, procedureStore, schemaStore)
+	mindHandler := handlers.NewMindHandler(memoryStore, episodeStore, procedureStore, schemaStore, agentStore)
 	tierHandler := handlers.NewTierHandler(memorySvc)
-	graphHandler := handlers.NewGraphHandler(hybridRecallSvc, graphBuilderSvc, graphStore, entityStore)
-	learningHandler := handlers.NewLearningHandler(learningSvc, implicitFeedbackSvc, mutationLogStore)
+	graphHandler := handlers.NewGraphHandler(hybridRecallSvc, graphBuilderSvc, graphStore, entityStore, agentStore, memoryStore)
+	learningHandler := handlers.NewLearningHandler(learningSvc, implicitFeedbackSvc, mutationLogStore, agentStore)
 	conversationSvc := service.NewConversationService(memorySvc, llmClient, logger)
 	conversationHandler := handlers.NewConversationHandler(conversationSvc, entityStore, sessionStore)
 
@@ -202,7 +203,9 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	// Global middleware (order matters)
 	r.Use(mw.RequestID) // Generate/extract request ID first
 	r.Use(mw.CORS(config.CORSAllowedOrigins()))
-	r.Use(middleware.RealIP)                                            // Extract real IP
+	if config.TrustProxyHeaders() {
+		r.Use(middleware.RealIP)
+	}
 	r.Use(metricsCollector.Middleware)                                  // Collect metrics
 	r.Use(mw.Logging(logger))                                           // Log all requests
 	r.Use(middleware.Recoverer)                                         // Recover from panics
@@ -227,7 +230,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	// Bootstrap (no auth — protected by X-Setup-Token header)
 	r.Post("/v1/setup", setupHandler.Bootstrap)
 
-	// Legacy tenant creation (no auth — deprecated, kept for backward compatibility)
+	// Legacy tenant creation (deprecated, kept for backward compatibility)
 	r.Post("/v1/tenants", tenantHandler.Create)
 
 	// Stripe webhook (no session/key auth — verified by signature). Mounted
@@ -251,6 +254,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 
 	r.Route("/v1", func(r chi.Router) {
 		r.Use(mw.SessionOrAPIKey(apiKeyStore, authSvc))
+		r.Use(mw.RequireWriteForMutations)
 
 		// Key management (admin scope required)
 		r.Route("/keys", func(r chi.Router) {
@@ -416,6 +420,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 			r.Get("/confidence/stats", cognitiveHandler.GetConfidenceStats)
 			r.Post("/confidence/reinforce", cognitiveHandler.ReinforceMemory)
 			r.Post("/confidence/penalize", cognitiveHandler.PenalizeMemory)
+			r.Get("/calibration", cognitiveHandler.GetCalibration)
 		})
 	})
 

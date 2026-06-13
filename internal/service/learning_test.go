@@ -113,7 +113,7 @@ func (m *mockMutationLogStore) Create(ctx context.Context, log *domain.MutationL
 	return nil
 }
 
-func (m *mockMutationLogStore) GetByMemoryID(ctx context.Context, memoryID uuid.UUID, limit int) ([]domain.MutationLog, error) {
+func (m *mockMutationLogStore) GetByMemoryID(ctx context.Context, memoryID uuid.UUID, tenantID uuid.UUID, limit int) ([]domain.MutationLog, error) {
 	var result []domain.MutationLog
 	for _, log := range m.logs {
 		if log.MemoryID == memoryID {
@@ -137,6 +137,26 @@ func (m *mockMutationLogStore) GetByAgentID(ctx context.Context, agentID uuid.UU
 		}
 	}
 	return result, nil
+}
+
+func (m *mockMutationLogStore) CalibrationSamples(ctx context.Context, tenantID uuid.UUID, agentID *uuid.UUID) ([]domain.CalibrationSample, error) {
+	var out []domain.CalibrationSample
+	for _, log := range m.logs {
+		if log.OldConfidence == nil || log.NewConfidence == nil {
+			continue
+		}
+		switch log.MutationType {
+		case domain.MutationFeedback, domain.MutationOutcome, domain.MutationContradiction:
+			if agentID != nil && log.AgentID != *agentID {
+				continue
+			}
+			out = append(out, domain.CalibrationSample{
+				Confidence: float64(*log.OldConfidence),
+				Correct:    *log.NewConfidence >= *log.OldConfidence,
+			})
+		}
+	}
+	return out, nil
 }
 
 type mockLearningStatsStore struct {
@@ -225,7 +245,7 @@ func TestLearningService_RecordOutcome_Success(t *testing.T) {
 		OccurredAt:   time.Now(),
 	}
 
-	err := svc.RecordOutcome(context.Background(), record)
+	err := svc.RecordOutcome(context.Background(), tenantID, record)
 	if err != nil {
 		t.Fatalf("RecordOutcome failed: %v", err)
 	}
@@ -279,7 +299,7 @@ func TestLearningService_RecordOutcome_Failure(t *testing.T) {
 		OccurredAt:   time.Now(),
 	}
 
-	err := svc.RecordOutcome(context.Background(), record)
+	err := svc.RecordOutcome(context.Background(), tenantID, record)
 	if err != nil {
 		t.Fatalf("RecordOutcome failed: %v", err)
 	}
@@ -335,7 +355,7 @@ func TestLearningService_RecordOutcome_Neutral(t *testing.T) {
 		OccurredAt:   time.Now(),
 	}
 
-	err := svc.RecordOutcome(context.Background(), record)
+	err := svc.RecordOutcome(context.Background(), tenantID, record)
 	if err != nil {
 		t.Fatalf("RecordOutcome failed: %v", err)
 	}
@@ -400,7 +420,7 @@ func TestConfidenceBounds(t *testing.T) {
 				OccurredAt:   time.Now(),
 			}
 
-			_ = svc.RecordOutcome(context.Background(), record)
+			_ = svc.RecordOutcome(context.Background(), tenantID, record)
 
 			updated, _ := memStore.GetByID(context.Background(), mem.ID, tenantID)
 			if updated.Confidence < tt.expectedConf-0.001 || updated.Confidence > tt.expectedConf+0.001 {

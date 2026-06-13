@@ -71,7 +71,7 @@ func (s *GraphBuilderService) extractAndLinkEntities(ctx context.Context, memory
 	}
 
 	for _, extracted := range entities {
-		entity, err := s.findOrCreateEntity(ctx, memory.AgentID, extracted)
+		entity, err := s.findOrCreateEntity(ctx, memory.AgentID, memory.TenantID, extracted)
 		if err != nil || entity == nil {
 			continue
 		}
@@ -96,7 +96,7 @@ func (s *GraphBuilderService) extractAndLinkEntities(ctx context.Context, memory
 }
 
 // findOrCreateEntity uses exact match, then alias match, then embedding similarity
-func (s *GraphBuilderService) findOrCreateEntity(ctx context.Context, agentID uuid.UUID, extracted domain.ExtractedEntity) (*domain.Entity, error) {
+func (s *GraphBuilderService) findOrCreateEntity(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, extracted domain.ExtractedEntity) (*domain.Entity, error) {
 	// 1. Exact match on name or alias
 	entity, err := s.entityStore.FindByNameOrAlias(ctx, agentID, extracted.Name)
 	if err == nil && entity != nil {
@@ -119,6 +119,7 @@ func (s *GraphBuilderService) findOrCreateEntity(ctx context.Context, agentID uu
 			// 3. Create new entity with embedding
 			entity = &domain.Entity{
 				AgentID:    agentID,
+				TenantID:   tenantID,
 				Name:       extracted.Name,
 				EntityType: extracted.EntityType,
 				Aliases:    []string{},
@@ -134,6 +135,7 @@ func (s *GraphBuilderService) findOrCreateEntity(ctx context.Context, agentID uu
 	// 3. Create new entity without embedding
 	entity = &domain.Entity{
 		AgentID:    agentID,
+		TenantID:   tenantID,
 		Name:       extracted.Name,
 		EntityType: extracted.EntityType,
 		Aliases:    []string{},

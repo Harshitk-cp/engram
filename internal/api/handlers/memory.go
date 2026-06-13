@@ -249,7 +249,8 @@ func (h *MemoryHandler) Delete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *MemoryHandler) Restore(w http.ResponseWriter, r *http.Request) {
-	if middleware.TenantFromContext(r.Context()) == nil {
+	tenant := middleware.TenantFromContext(r.Context())
+	if tenant == nil {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -260,7 +261,7 @@ func (h *MemoryHandler) Restore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.svc.Restore(r.Context(), id); err != nil {
+	if err := h.svc.Restore(r.Context(), id, tenant.ID); err != nil {
 		if errors.Is(err, service.ErrMemoryNotFound) {
 			writeError(w, http.StatusNotFound, err.Error())
 			return

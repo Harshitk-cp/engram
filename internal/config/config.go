@@ -188,6 +188,13 @@ func SessionTTLHours() int {
 // it works on http://localhost; set COOKIE_SECURE=true behind HTTPS.
 func CookieSecure() bool { return strings.EqualFold(os.Getenv("COOKIE_SECURE"), "true") }
 
+// TrustProxyHeaders controls whether client-IP headers (X-Real-IP /
+// X-Forwarded-For) are honored. Default false: on a directly-exposed server
+// those headers are attacker-controlled and would let anyone spoof the IP the
+// rate limiter keys on. Set TRUST_PROXY_HEADERS=true only behind a proxy that
+// strips and re-sets them.
+func TrustProxyHeaders() bool { return strings.EqualFold(os.Getenv("TRUST_PROXY_HEADERS"), "true") }
+
 // AppBaseURL is the externally-reachable base URL, used to build OAuth redirect
 // URIs. Defaults to http://localhost:<port>.
 func AppBaseURL() string {

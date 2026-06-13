@@ -30,7 +30,7 @@ func (h *AuditHandler) Verify(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	valid, checked, breakSeq, err := h.store.VerifyChain(r.Context(), tenant.ID)
+	valid, checked, breakSeq, reason, err := h.store.VerifyChain(r.Context(), tenant.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "verify failed")
 		return
@@ -40,6 +40,7 @@ func (h *AuditHandler) Verify(w http.ResponseWriter, r *http.Request) {
 		"valid":       valid,
 		"checked":     checked,
 		"break_seq":   breakSeq,
+		"reason":      reason,
 		"head_seq":    headSeq,
 		"head_hash":   headHash,
 		"signed":      h.signingKey != "",

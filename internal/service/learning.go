@@ -74,11 +74,13 @@ func (s *LearningService) RecordMemoryUsage(ctx context.Context, episodeID uuid.
 	return nil
 }
 
-// RecordOutcome records the outcome of an episode and propagates effects to used memories.
-func (s *LearningService) RecordOutcome(ctx context.Context, record domain.OutcomeRecord) error {
+// RecordOutcome records the outcome of an episode and propagates effects to used
+// memories. All episode and memory lookups are scoped to tenantID so callers
+// cannot mutate (or write audit rows against) another tenant's data.
+func (s *LearningService) RecordOutcome(ctx context.Context, tenantID uuid.UUID, record domain.OutcomeRecord) error {
 	// Update episode outcome
 	if s.episodeStore != nil {
-		if err := s.episodeStore.UpdateOutcome(ctx, record.EpisodeID, record.Outcome, ""); err != nil {
+		if err := s.episodeStore.UpdateOutcome(ctx, record.EpisodeID, tenantID, record.Outcome, ""); err != nil {
 			s.logger.Warn("failed to update episode outcome", zap.Error(err))
 		}
 	}
@@ -101,7 +103,7 @@ func (s *LearningService) RecordOutcome(ctx context.Context, record domain.Outco
 
 	// Apply effect to all memories used
 	for _, memID := range record.MemoriesUsed {
-		if err := s.applyOutcomeEffect(ctx, memID, effect, feedbackType, record.EpisodeID); err != nil {
+		if err := s.applyOutcomeEffect(ctx, tenantID, memID, effect, feedbackType, record.EpisodeID); err != nil {
 			s.logger.Warn("failed to apply outcome effect to memory",
 				zap.String("memory_id", memID.String()),
 				zap.Error(err),
@@ -112,10 +114,10 @@ func (s *LearningService) RecordOutcome(ctx context.Context, record domain.Outco
 	return nil
 }
 
-func (s *LearningService) applyOutcomeEffect(ctx context.Context, memID uuid.UUID, effect domain.FeedbackEffect, feedbackType domain.FeedbackType, episodeID uuid.UUID) error {
-	memory, err := s.getMemoryByIDWithoutTenant(ctx, memID)
-	if err != nil {
-		return err
+func (s *LearningService) applyOutcomeEffect(ctx context.Context, tenantID uuid.UUID, memID uuid.UUID, effect domain.FeedbackEffect, feedbackType domain.FeedbackType, episodeID uuid.UUID) error {
+	memory, err := s.memoryStore.GetByID(ctx, memID, tenantID)
+	if err != nil || memory == nil {
+		return ErrMemoryNotFound
 	}
 
 	oldConfidence := memory.Confidence
@@ -172,15 +174,6 @@ func (s *LearningService) applyOutcomeEffect(ctx context.Context, memID uuid.UUI
 	)
 
 	return nil
-}
-
-// getMemoryByIDWithoutTenant is a helper to find a memory by ID without requiring tenant context.
-func (s *LearningService) getMemoryByIDWithoutTenant(ctx context.Context, memID uuid.UUID) (*domain.Memory, error) {
-	mem, err := s.memoryStore.GetByIDOnly(ctx, memID)
-	if err == nil {
-		return mem, nil
-	}
-	return nil, ErrMemoryNotFound
 }
 
 // GetLearningStats returns aggregated learning statistics for an agent.

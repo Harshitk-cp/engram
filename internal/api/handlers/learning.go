@@ -17,17 +17,20 @@ type LearningHandler struct {
 	learningSvc          *service.LearningService
 	implicitFeedbackSvc  *service.ImplicitFeedbackDetector
 	mutationLogStore     domain.MutationLogStore
+	agentStore           domain.AgentStore
 }
 
 func NewLearningHandler(
 	learningSvc *service.LearningService,
 	implicitFeedbackSvc *service.ImplicitFeedbackDetector,
 	mutationLogStore domain.MutationLogStore,
+	agentStore domain.AgentStore,
 ) *LearningHandler {
 	return &LearningHandler{
 		learningSvc:         learningSvc,
 		implicitFeedbackSvc: implicitFeedbackSvc,
 		mutationLogStore:    mutationLogStore,
+		agentStore:          agentStore,
 	}
 }
 
@@ -87,7 +90,7 @@ func (h *LearningHandler) RecordOutcome(w http.ResponseWriter, r *http.Request) 
 		OccurredAt:   time.Now(),
 	}
 
-	if err := h.learningSvc.RecordOutcome(r.Context(), record); err != nil {
+	if err := h.learningSvc.RecordOutcome(r.Context(), tenant.ID, record); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to record outcome")
 		return
 	}
@@ -128,6 +131,10 @@ func (h *LearningHandler) DetectImplicitFeedback(w http.ResponseWriter, r *http.
 	agentID, err := uuid.Parse(req.AgentID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid agent_id")
+		return
+	}
+
+	if !requireAgentInTenant(w, r, h.agentStore, agentID, tenant.ID) {
 		return
 	}
 
@@ -178,6 +185,10 @@ func (h *LearningHandler) GetStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !requireAgentInTenant(w, r, h.agentStore, agentID, tenant.ID) {
+		return
+	}
+
 	stats, err := h.learningSvc.GetLearningStats(r.Context(), agentID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to get learning stats")
@@ -224,7 +235,7 @@ func (h *LearningHandler) GetMutationHistory(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	mutations, err := h.mutationLogStore.GetByMemoryID(r.Context(), memoryID, limit)
+	mutations, err := h.mutationLogStore.GetByMemoryID(r.Context(), memoryID, tenant.ID, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to get mutation history")
 		return

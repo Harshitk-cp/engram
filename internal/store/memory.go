@@ -479,7 +479,10 @@ func (s *MemoryStore) RecallExhaustive(ctx context.Context, queryEmbedding []flo
 	offset := 0
 
 
-	anchorClause := "AND anchor_id IS NULL"
+	// No-anchor recall must exclude session-bound rows too: anonymous-session
+	// memories have anchor_id NULL but belong to one conversation only
+	// (mirrors the default branch in Recall).
+	anchorClause := "AND anchor_id IS NULL AND session_id IS NULL"
 	var anchorArg []any
 	if opts.AnchorID != nil {
 		anchorClause = "AND anchor_id = $5"
@@ -564,7 +567,9 @@ func (s *MemoryStore) RecallHybrid(ctx context.Context, query string, queryEmbed
 		typeCondition = fmt.Sprintf("AND type = $%d", len(args))
 	}
 
-	anchorCondition := "AND anchor_id IS NULL"
+	// No-anchor recall must exclude session-bound rows too: anonymous-session
+	// memories have anchor_id NULL but belong to one conversation only
+	anchorCondition := "AND anchor_id IS NULL AND session_id IS NULL"
 	if opts.AnchorID != nil {
 		args = append(args, *opts.AnchorID)
 		anchorCondition = fmt.Sprintf("AND anchor_id = $%d", len(args))
@@ -879,11 +884,18 @@ func (s *MemoryStore) ListDistinctAgentIDs(ctx context.Context) ([]uuid.UUID, er
 	return agentIDs, rows.Err()
 }
 
+// decayBatchLimit bounds how many rows a single background pass materializes
+// (rows include full embedding vectors); without it one very large agent can
+// OOM the whole process. Agents above the cap are processed partially per tick.
+const decayBatchLimit = 10000
+
 func (s *MemoryStore) GetByAgentForDecay(ctx context.Context, agentID uuid.UUID) ([]domain.Memory, error) {
 	rows, err := s.db.Query(ctx,
 		`SELECT id, agent_id, tenant_id, type, content, embedding, embedding_provider, embedding_model, source, provenance, confidence, metadata, expires_at, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at
-		 FROM memories WHERE agent_id = $1 AND is_archived = FALSE`,
-		agentID,
+		 FROM memories WHERE agent_id = $1 AND is_archived = FALSE
+		 ORDER BY last_accessed_at ASC NULLS FIRST
+		 LIMIT $2`,
+		agentID, decayBatchLimit,
 	)
 	if err != nil {
 		return nil, err
@@ -917,10 +929,10 @@ func (s *MemoryStore) Archive(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-func (s *MemoryStore) Restore(ctx context.Context, id uuid.UUID) error {
+func (s *MemoryStore) Restore(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error {
 	tag, err := s.db.Exec(ctx,
-		`UPDATE memories SET is_archived = FALSE, archived_at = NULL, updated_at = NOW() WHERE id = $1 AND is_archived = TRUE`,
-		id,
+		`UPDATE memories SET is_archived = FALSE, archived_at = NULL, updated_at = NOW() WHERE id = $1 AND tenant_id = $2 AND is_archived = TRUE`,
+		id, tenantID,
 	)
 	if err != nil {
 		return err

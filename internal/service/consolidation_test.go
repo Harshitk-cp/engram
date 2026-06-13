@@ -122,7 +122,7 @@ func (m *mockMemoryStoreForConsolidation) Archive(ctx context.Context, id uuid.U
 	return nil
 }
 
-func (m *mockMemoryStoreForConsolidation) Restore(ctx context.Context, id uuid.UUID) error {
+func (m *mockMemoryStoreForConsolidation) Restore(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error {
 	return nil
 }
 
@@ -279,7 +279,7 @@ func (m *mockEpisodeStoreForConsolidation) RecordAccess(ctx context.Context, id 
 	return nil
 }
 
-func (m *mockEpisodeStoreForConsolidation) UpdateOutcome(ctx context.Context, id uuid.UUID, outcome domain.OutcomeType, description string) error {
+func (m *mockEpisodeStoreForConsolidation) UpdateOutcome(ctx context.Context, id uuid.UUID, tenantID uuid.UUID, outcome domain.OutcomeType, description string) error {
 	for i := range m.episodes {
 		if m.episodes[i].ID == id {
 			m.episodes[i].Outcome = outcome
