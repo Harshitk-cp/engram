@@ -6,6 +6,8 @@ dist/
 *.dll
 *.so
 *.dylib
+/engram-server
+/engram-mcp
 
 #OS
 .DS_Store

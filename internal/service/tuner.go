@@ -12,8 +12,8 @@ import (
 
 const (
 	// Thresholds for policy adjustment
-	ignoredThreshold  = 0.7
-	helpfulThreshold  = 0.7
+	ignoredThreshold   = 0.7
+	helpfulThreshold   = 0.7
 	unhelpfulThreshold = 0.7
 
 	// Adjustment amounts

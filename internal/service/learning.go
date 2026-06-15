@@ -3,12 +3,21 @@ package service
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/Harshitk-cp/engram/internal/domain"
 	"github.com/Harshitk-cp/engram/internal/store"
 	"github.com/google/uuid"
 	"go.uber.org/zap"
+)
+
+const (
+	// defaultLearningStatsInterval is how often the background worker recomputes
+	// per-agent learning stats (velocity / stability).
+	defaultLearningStatsInterval = 1 * time.Hour
+	// defaultLearningStatsWindow is the trailing window the stats summarize.
+	defaultLearningStatsWindow = 7 * 24 * time.Hour
 )
 
 type LearningService struct {
@@ -19,6 +28,12 @@ type LearningService struct {
 	learningStatsStore   domain.LearningStatsStore
 	uow                  *store.UnitOfWork
 	logger               *zap.Logger
+
+	interval   time.Duration
+	window     time.Duration
+	stopCh     chan struct{}
+	cancelRuns context.CancelFunc
+	wg         sync.WaitGroup
 }
 
 func NewLearningService(
@@ -30,6 +45,15 @@ func NewLearningService(
 		memoryStore:  memoryStore,
 		episodeStore: episodeStore,
 		logger:       logger,
+		interval:     defaultLearningStatsInterval,
+		window:       defaultLearningStatsWindow,
+		stopCh:       make(chan struct{}),
+	}
+}
+
+func (s *LearningService) SetStatsInterval(d time.Duration) {
+	if d > 0 {
+		s.interval = d
 	}
 }
 
@@ -47,6 +71,80 @@ func (s *LearningService) SetLearningStatsStore(store domain.LearningStatsStore)
 
 func (s *LearningService) SetUnitOfWork(uow *store.UnitOfWork) {
 	s.uow = uow
+}
+
+func (s *LearningService) Start() {
+	if s.learningStatsStore == nil || s.mutationLogStore == nil {
+		s.logger.Info("learning-stats worker disabled (stores not wired)")
+		return
+	}
+	baseCtx, cancel := context.WithCancel(context.Background())
+	s.cancelRuns = cancel
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		ticker := time.NewTicker(s.interval)
+		defer ticker.Stop()
+
+		s.logger.Info("learning-stats worker started",
+			zap.Duration("interval", s.interval),
+			zap.Duration("window", s.window))
+
+		s.runStatsTick(baseCtx)
+
+		for {
+			select {
+			case <-ticker.C:
+				s.runStatsTick(baseCtx)
+			case <-s.stopCh:
+				s.logger.Info("learning-stats worker stopped")
+				return
+			}
+		}
+	}()
+}
+
+func (s *LearningService) Stop() {
+	if s.cancelRuns != nil {
+		s.cancelRuns()
+	}
+	close(s.stopCh)
+	s.wg.Wait()
+}
+
+func (s *LearningService) runStatsTick(baseCtx context.Context) {
+	ctx, cancel := context.WithTimeout(baseCtx, 60*time.Second)
+	defer cancel()
+	guardPanic(s.logger, "learning-stats tick", func() {
+		if err := s.RunStats(ctx); err != nil {
+			s.logger.Error("learning-stats run failed", zap.Error(err))
+		}
+	})
+}
+
+func (s *LearningService) RunStats(ctx context.Context) error {
+	if s.learningStatsStore == nil || s.mutationLogStore == nil {
+		return nil
+	}
+
+	agentIDs, err := s.memoryStore.ListDistinctAgentIDs(ctx)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	periodEnd := now.Truncate(24 * time.Hour).Add(24 * time.Hour) // start of next UTC day
+	periodStart := periodEnd.Add(-s.window)
+
+	for _, agentID := range agentIDs {
+		if _, err := s.ComputeLearningStats(ctx, agentID, periodStart, periodEnd); err != nil {
+			s.logger.Warn("learning-stats failed for agent",
+				zap.String("agent_id", agentID.String()),
+				zap.Error(err))
+		}
+	}
+
+	return nil
 }
 
 // RecordMemoryUsage records which memories were used during an episode.
@@ -222,6 +320,8 @@ func (s *LearningService) ComputeLearningStats(ctx context.Context, agentID uuid
 		PeriodEnd:   periodEnd,
 	}
 
+	contradictionEvents := 0
+
 	for _, m := range mutations {
 		if m.CreatedAt.After(periodEnd) {
 			continue
@@ -240,6 +340,8 @@ func (s *LearningService) ComputeLearningStats(ctx context.Context, agentID uuid
 
 		// Count by mutation type
 		switch m.MutationType {
+		case domain.MutationContradiction:
+			contradictionEvents++
 		case domain.MutationReinforcement:
 			stats.MemoriesReinforced++
 		case domain.MutationFeedback:
@@ -275,11 +377,27 @@ func (s *LearningService) ComputeLearningStats(ctx context.Context, agentID uuid
 		}
 	}
 
-	// Compute derived metrics
+	// Compute derived metrics.
+	//
+	// LearningVelocity: net direction of confidence movement, in [-1, 1].
+	// +1 = every learning signal raised confidence (rapidly acquiring beliefs),
+	// -1 = every signal lowered it (beliefs being walked back), 0 = balanced.
 	totalChanges := float32(stats.ConfidenceIncreases + stats.ConfidenceDecreases)
 	if totalChanges > 0 {
 		velocity := float32(stats.ConfidenceIncreases-stats.ConfidenceDecreases) / totalChanges
 		stats.LearningVelocity = &velocity
+	}
+
+	// StabilityScore: of the times existing beliefs were touched, the share that
+	// held up versus had to be overturned, in [0, 1]. 1.0 = nothing contradicted
+	// or marked stale (settled knowledge); 0.0 = everything overturned (volatile).
+	// Orthogonal to velocity, which only measures confidence direction.
+	reinforced := stats.HelpfulCount + stats.SuccessCount + stats.MemoriesReinforced
+	overturned := stats.UnhelpfulCount + stats.ContradictedCount + stats.OutdatedCount + stats.FailureCount + contradictionEvents
+	touched := float32(reinforced + overturned)
+	if touched > 0 {
+		stability := float32(reinforced) / touched
+		stats.StabilityScore = &stability
 	}
 
 	// Store stats

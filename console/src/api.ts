@@ -65,6 +65,45 @@ export interface AuditStatus {
   valid: boolean; checked: number; break_seq?: number | null;
   head_seq: number; head_hash: string; signed: boolean; verified_at: string;
 }
+export interface ChainEntry {
+  id: string; memory_id?: string; agent_id?: string; mutation_type: string;
+  source_type?: string; old_confidence?: number; new_confidence?: number;
+  reason: string; content_hash?: string; actor_type?: string; created_at: string;
+  seq: number; prev_hash?: string; row_hash?: string;
+}
+export interface EngineSettings {
+  decay_base_rate: number;
+  decay_floor: number;
+  archive_threshold: number;
+  competition_weight: number;
+  reinforcement_log_odds: number;
+  contradiction_log_odds: number;
+  firewall_enabled?: boolean;
+  quarantine_provenances?: string[];
+}
+
+export interface Anchor {
+  id: string;
+  name: string;
+  entity_type: string;
+  external_id?: string;
+  aliases?: string[];
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface QuarantineItem {
+  id: string;
+  content: string;
+  type: string;
+  provenance: string;
+  source?: string;
+  quarantine_reason?: string;
+  quarantined_at?: string;
+  created_at?: string;
+}
+export interface EngineSettingsResponse { settings: EngineSettings; defaults: EngineSettings; }
+
 export interface PlanLimits { max_agents: number; max_memories_per_month: number; price_usd: number; }
 export interface Usage { period_month: string; memories_written: number; recalls: number; }
 export interface PlanOption { plan: string; limits: PlanLimits; purchasable: boolean; }
@@ -84,6 +123,8 @@ export const Auth = {
   logout: () => req<void>("/auth/logout", { method: "POST" }),
   switchOrg: (tenant_id: string) =>
     req<void>("/auth/switch-tenant", { method: "POST", body: JSON.stringify({ tenant_id }) }),
+  createOrg: (name: string) =>
+    req<Org>("/auth/orgs", { method: "POST", body: JSON.stringify({ name }) }),
 };
 
 // ---------- Data plane ----------
@@ -92,8 +133,12 @@ export const Api = {
     req<{ agents: Agent[]; total: number; count: number; limit: number; offset: number }>(
       `/v1/agents/?limit=${limit}&offset=${offset}`
     ),
-  createAgent: (external_id: string, name: string) =>
-    req<Agent>("/v1/agents/", { method: "POST", body: JSON.stringify({ external_id, name }) }),
+  // external_id is optional — the server derives a unique one from the name when omitted.
+  createAgent: (name: string, external_id?: string) =>
+    req<Agent>("/v1/agents/", {
+      method: "POST",
+      body: JSON.stringify(external_id ? { name, external_id } : { name }),
+    }),
   dashboard: (agentId: string) => req<Dashboard>(`/v1/agents/${agentId}/dashboard`),
   memories: (
     agentId: string,
@@ -129,10 +174,49 @@ export const Api = {
     req<unknown>("/v1/canon/", { method: "POST", body: JSON.stringify({ agent_id, content, type }) }),
   deleteCanon: (id: string) => req<unknown>(`/v1/canon/${id}`, { method: "DELETE" }),
   auditVerify: () => req<AuditStatus>("/v1/audit/verify"),
+  auditChain: (agentId?: string, limit = 100) =>
+    req<{ entries: ChainEntry[]; count: number }>(
+      `/v1/audit/chain?limit=${limit}${agentId ? `&agent_id=${agentId}` : ""}`
+    ).then((r) => r.entries ?? []),
   listKeys: () => req<{ keys: ApiKey[] }>("/v1/keys/").then((r) => r.keys ?? []),
   createKey: (name: string, scopes: string[]) =>
     req<ApiKey & { api_key?: string }>("/v1/keys/", { method: "POST", body: JSON.stringify({ name, scopes }) }),
   revokeKey: (id: string) => req<void>(`/v1/keys/${id}`, { method: "DELETE" }),
+
+  // Embedding configuration (deployment-level, read-only)
+  embeddingInfo: () =>
+    req<{ provider: string; model: string; dimension: number; base_url?: string }>("/v1/embedding/info"),
+  reembedAgent: (agentId: string) =>
+    req<{ reembedded: number }>(`/v1/admin/agents/${agentId}/reembed`, { method: "POST" }),
+
+  // Engine settings (per-tenant tuning)
+  getSettings: () => req<EngineSettingsResponse>("/v1/settings/"),
+  updateSettings: (s: EngineSettings) =>
+    req<EngineSettingsResponse>("/v1/settings/", { method: "PUT", body: JSON.stringify(s) }),
+
+  // Subjects (anchors) — GDPR right-to-erasure
+  anchors: (limit = 200) =>
+    req<{ anchors: Anchor[]; count: number }>(`/v1/anchors/?limit=${limit}`).then((r) => r.anchors ?? []),
+  anchorMemories: (id: string) =>
+    req<{ memories: Memory[]; count: number }>(`/v1/anchors/${id}/memories`).then((r) => r.memories ?? []),
+  shredSubject: (id: string, reason: string) =>
+    req<{ shredded: number }>(`/v1/admin/anchors/${id}/shred`, {
+      method: "POST", body: JSON.stringify({ reason }),
+    }),
+  purgeSubject: (id: string) =>
+    req<{ deleted: boolean; memories_purged: number }>(`/v1/anchors/${id}?purge=true`, { method: "DELETE" }),
+
+  // Provenance Firewall — quarantine review queue
+  quarantine: (agentId: string, limit = 50, offset = 0) =>
+    req<{ items: QuarantineItem[]; total: number; limit: number; offset: number }>(
+      `/v1/agents/${agentId}/quarantine?limit=${limit}&offset=${offset}`
+    ),
+  releaseQuarantine: (id: string, note?: string) =>
+    req<{ released: boolean }>(`/v1/quarantine/${id}/release`, {
+      method: "POST", body: JSON.stringify({ note: note ?? "" }),
+    }),
+  rejectQuarantine: (id: string, note?: string) =>
+    req<void>(`/v1/quarantine/${id}/reject`, { method: "POST", body: JSON.stringify({ note: note ?? "" }) }),
 
   // Billing (managed cloud)
   billing: () => req<BillingState>("/v1/billing/"),

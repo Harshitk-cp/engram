@@ -16,17 +16,17 @@ import (
 
 // Schema service constants
 const (
-	MinClusterSize            = 5    // Minimum memories to form a schema
-	MinEvidenceConfidence     = 0.6  // Minimum confidence for memories to count as evidence
+	MinClusterSize            = 5              // Minimum memories to form a schema
+	MinEvidenceConfidence     = 0.6            // Minimum confidence for memories to count as evidence
 	MinEvidenceAge            = 24 * time.Hour // Minimum stability period
-	SchemaSimilarityThreshold = 0.7  // For finding similar schemas
-	SchemaConfidenceBoost     = 0.05 // Confidence boost per evidence
-	MaxSchemaConfidence       = 0.95 // Maximum schema confidence
-	MinSchemaMatchScore       = 0.3  // Minimum score to consider a schema match
-	ContextMatchWeight        = 0.3  // Weight for context matching
-	TimeMatchWeight           = 0.2  // Weight for time-based matching
-	EmbeddingSimilarityWeight = 0.5  // Weight for embedding similarity
-	ClusteringThreshold       = 0.65 // Cosine similarity threshold for clustering
+	SchemaSimilarityThreshold = 0.7            // For finding similar schemas
+	SchemaConfidenceBoost     = 0.05           // Confidence boost per evidence
+	MaxSchemaConfidence       = 0.95           // Maximum schema confidence
+	MinSchemaMatchScore       = 0.3            // Minimum score to consider a schema match
+	ContextMatchWeight        = 0.3            // Weight for context matching
+	TimeMatchWeight           = 0.2            // Weight for time-based matching
+	EmbeddingSimilarityWeight = 0.5            // Weight for embedding similarity
+	ClusteringThreshold       = 0.65           // Cosine similarity threshold for clustering
 )
 
 var (

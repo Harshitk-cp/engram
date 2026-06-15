@@ -58,6 +58,16 @@ type APIKeyAuth struct {
 	Tenant *Tenant
 }
 
+// ActorType reports how the caller authenticated, for tamper-evident audit
+// attribution: "user" for a logged-in console session, "api_key" for a
+// programmatic API key. The audit trail must not conflate the two.
+func (a *APIKeyAuth) ActorType() string {
+	if a.UserID != nil {
+		return "user"
+	}
+	return "api_key"
+}
+
 // HasScope reports whether the auth context includes the requested scope.
 // Keys with admin scope implicitly satisfy any scope check.
 func (a *APIKeyAuth) HasScope(scope string) bool {

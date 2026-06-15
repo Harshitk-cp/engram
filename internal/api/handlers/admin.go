@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/Harshitk-cp/engram/internal/api/middleware"
+	"github.com/Harshitk-cp/engram/internal/config"
 	"github.com/Harshitk-cp/engram/internal/domain"
 	"github.com/Harshitk-cp/engram/internal/service"
 	"github.com/go-chi/chi/v5"
@@ -56,14 +57,14 @@ func (h *AdminHandler) UpdateMemory(w http.ResponseWriter, r *http.Request) {
 
 	var mem *domain.Memory
 	if req.Content != nil {
-		mem, err = h.svc.UpdateContent(r.Context(), id, tenant.ID, *req.Content, req.Reason, auth.KeyID)
+		mem, err = h.svc.UpdateContent(r.Context(), id, tenant.ID, *req.Content, req.Reason, auth.ActorType(), auth.KeyID)
 		if err != nil {
 			h.writeServiceErr(w, err)
 			return
 		}
 	}
 	if req.Confidence != nil {
-		mem, err = h.svc.UpdateConfidence(r.Context(), id, tenant.ID, *req.Confidence, req.Reason, auth.KeyID)
+		mem, err = h.svc.UpdateConfidence(r.Context(), id, tenant.ID, *req.Confidence, req.Reason, auth.ActorType(), auth.KeyID)
 		if err != nil {
 			h.writeServiceErr(w, err)
 			return
@@ -94,7 +95,7 @@ func (h *AdminHandler) Redact(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if err := h.svc.RedactMemory(r.Context(), id, tenant.ID, req.Reason, auth.KeyID); err != nil {
+	if err := h.svc.RedactMemory(r.Context(), id, tenant.ID, req.Reason, auth.ActorType(), auth.KeyID); err != nil {
 		h.writeServiceErr(w, err)
 		return
 	}
@@ -130,7 +131,7 @@ func (h *AdminHandler) ResolveContradiction(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "invalid demote_id")
 		return
 	}
-	if err := h.svc.ResolveContradiction(r.Context(), tenant.ID, keepID, demoteID, req.Reason, auth.KeyID); err != nil {
+	if err := h.svc.ResolveContradiction(r.Context(), tenant.ID, keepID, demoteID, req.Reason, auth.ActorType(), auth.KeyID); err != nil {
 		h.writeServiceErr(w, err)
 		return
 	}
@@ -156,12 +157,37 @@ func (h *AdminHandler) CryptoShredAnchor(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	n, err := h.svc.CryptoShredAnchor(r.Context(), anchorID, tenant.ID, req.Reason, auth.KeyID)
+	n, err := h.svc.CryptoShredAnchor(r.Context(), anchorID, tenant.ID, req.Reason, auth.ActorType(), auth.KeyID)
 	if err != nil {
 		h.writeServiceErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"shredded": n})
+}
+
+// Reembed handles POST /v1/admin/agents/{id}/reembed — recompute an agent's
+// vectors under the currently configured embedding model (same dimension).
+func (h *AdminHandler) Reembed(w http.ResponseWriter, r *http.Request) {
+	tenant := middleware.TenantFromContext(r.Context())
+	if tenant == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	agentID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid agent id")
+		return
+	}
+	n, err := h.svc.ReembedAgent(r.Context(), agentID, tenant.ID, config.EmbeddingDim())
+	if err != nil {
+		if errors.Is(err, service.ErrReembedUnavailable) {
+			writeError(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"reembedded": n})
 }
 
 func (h *AdminHandler) writeServiceErr(w http.ResponseWriter, err error) {

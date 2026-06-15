@@ -71,11 +71,15 @@ func (s *MemoryStore) Create(ctx context.Context, m *domain.Memory) error {
 		m.DecayRate = domain.DefaultDecayRate(m.Binding)
 	}
 
+	var quarantineReason *string
+	if m.QuarantineReason != "" {
+		quarantineReason = &m.QuarantineReason
+	}
 	return s.db.QueryRow(ctx,
-		`INSERT INTO memories (agent_id, tenant_id, type, content, embedding, embedding_provider, embedding_model, source, provenance, confidence, metadata, event_date, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, binding, anchor_id, session_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $14, NOW(), $12, $13, NOW(), 0, $15, $16, $17)
+		`INSERT INTO memories (agent_id, tenant_id, type, content, embedding, embedding_provider, embedding_model, source, provenance, confidence, metadata, event_date, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, binding, anchor_id, session_id, quarantine_reason, quarantined_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $14, NOW(), $12, $13, NOW(), 0, $15, $16, $17, $18, $19)
 		 RETURNING id, created_at, updated_at, last_verified_at, last_accessed_at`,
-		m.AgentID, m.TenantID, m.Type, m.Content, embedding, m.EmbeddingProvider, m.EmbeddingModel, m.Source, m.Provenance, m.Confidence, m.Metadata, m.ReinforcementCount, m.DecayRate, m.EventDate, m.Binding, m.AnchorID, m.SessionID,
+		m.AgentID, m.TenantID, m.Type, m.Content, embedding, m.EmbeddingProvider, m.EmbeddingModel, m.Source, m.Provenance, m.Confidence, m.Metadata, m.ReinforcementCount, m.DecayRate, m.EventDate, m.Binding, m.AnchorID, m.SessionID, quarantineReason, m.QuarantinedAt,
 	).Scan(&m.ID, &m.CreatedAt, &m.UpdatedAt, &m.LastVerifiedAt, &m.LastAccessedAt)
 }
 
@@ -215,8 +219,32 @@ func (s *MemoryStore) ListByAnchor(ctx context.Context, anchorID, tenantID uuid.
 func (s *MemoryStore) PurgeByAnchor(ctx context.Context, anchorID, tenantID uuid.UUID) (int64, error) {
 	var affected int64
 	err := WithTx(ctx, s.pool, func(tx pgx.Tx) error {
+		txs := s.withTx(tx)
+
+		// Identify the subject's memories and everything transitively derived from
+		// them BEFORE deleting, so the erasure also covers inferred beliefs.
+		anchorMems, err := txs.ListByAnchor(ctx, anchorID, tenantID, 100000)
+		if err != nil {
+			return err
+		}
+		ids := make([]uuid.UUID, 0, len(anchorMems))
+		for i := range anchorMems {
+			ids = append(ids, anchorMems[i].ID)
+		}
+		var derivedIDs []uuid.UUID
+		if len(ids) > 0 {
+			derived, err := txs.DerivedMemoryClosure(ctx, ids, tenantID)
+			if err != nil {
+				return err
+			}
+			for i := range derived {
+				derivedIDs = append(derivedIDs, derived[i].ID)
+			}
+		}
+
 		// GDPR erasure: keep the hash as proof of what was erased, but do NOT
-		// retain the original content (that would defeat the erasure).
+		// retain the original content (that would defeat the erasure). Deleting the
+		// memory rows cascades entity_mentions and memory_graph (FK ON DELETE CASCADE).
 		if err := snapshotMemoriesForRemoval(ctx, tx, domain.MutationDeletion, "deletion: anchor purge (erasure)", false,
 			"anchor_id = $1 AND tenant_id = $2", anchorID, tenantID); err != nil {
 			return err
@@ -226,9 +254,123 @@ func (s *MemoryStore) PurgeByAnchor(ctx context.Context, anchorID, tenantID uuid
 			return err
 		}
 		affected = tag.RowsAffected()
+
+		// Inferred beliefs derived from the subject's data.
+		if len(derivedIDs) > 0 {
+			if err := snapshotMemoriesForRemoval(ctx, tx, domain.MutationDeletion, "deletion: derived from purged subject (erasure)", false,
+				"id = ANY($1) AND tenant_id = $2", derivedIDs, tenantID); err != nil {
+				return err
+			}
+			tag, err := tx.Exec(ctx, `DELETE FROM memories WHERE id = ANY($1) AND tenant_id = $2`, derivedIDs, tenantID)
+			if err != nil {
+				return err
+			}
+			affected += tag.RowsAffected()
+		}
+
+		// memory_associations has no FK to memories, so its rows don't cascade —
+		// remove any referencing an erased memory to avoid dangling links.
+		allIDs := append(ids, derivedIDs...)
+		if len(allIDs) > 0 {
+			if _, err := tx.Exec(ctx, `DELETE FROM memory_associations WHERE source_memory_id = ANY($1) OR target_memory_id = ANY($1)`, allIDs); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	return affected, err
+}
+
+// DerivedMemoryClosure returns every memory transitively derived from the given
+// root memories (following memory_graph 'derived_from' edges, where source_id was
+// derived from target_id), tenant-scoped and excluding the roots and rows whose
+// content is already crypto-shredded. GDPR erasure uses this so beliefs inferred
+// from a subject's data are erased along with the source.
+func (s *MemoryStore) DerivedMemoryClosure(ctx context.Context, rootIDs []uuid.UUID, tenantID uuid.UUID) ([]domain.Memory, error) {
+	if len(rootIDs) == 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(ctx, `
+		WITH RECURSIVE derived AS (
+			SELECT mg.source_id AS id
+			FROM memory_graph mg
+			WHERE mg.relation_type = 'derived_from' AND mg.target_id = ANY($1)
+			UNION
+			SELECT mg.source_id
+			FROM memory_graph mg
+			JOIN derived d ON mg.target_id = d.id
+			WHERE mg.relation_type = 'derived_from'
+		)
+		SELECT m.id, m.agent_id, m.tenant_id, m.content, m.anchor_id, m.binding
+		FROM memories m
+		JOIN derived d ON m.id = d.id
+		WHERE m.tenant_id = $2
+		  AND NOT (m.id = ANY($1))
+		  AND m.is_archived = FALSE
+		  AND m.content NOT LIKE 'enc:v1:%'`, // cryptoShredPrefix (service/crypto.go) — skip already-shredded
+		rootIDs, tenantID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.Memory
+	for rows.Next() {
+		var m domain.Memory
+		if err := rows.Scan(&m.ID, &m.AgentID, &m.TenantID, &m.Content, &m.AnchorID, &m.Binding); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// PurgeSubjectGraphLinks deletes the structural traces of the given (erased)
+// memories: entity↔memory links, knowledge-graph edges, and spreading-activation
+// associations. These tables cascade on memory DELETE, but crypto-shred redacts
+// in place (the row survives), so GDPR erasure must remove them explicitly.
+func (s *MemoryStore) PurgeSubjectGraphLinks(ctx context.Context, memoryIDs []uuid.UUID) (mentions, edges, assocs int64, err error) {
+	if len(memoryIDs) == 0 {
+		return 0, 0, 0, nil
+	}
+	tag, err := s.db.Exec(ctx, `DELETE FROM entity_mentions WHERE memory_id = ANY($1)`, memoryIDs)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	mentions = tag.RowsAffected()
+
+	tag, err = s.db.Exec(ctx, `DELETE FROM memory_graph WHERE source_id = ANY($1) OR target_id = ANY($1)`, memoryIDs)
+	if err != nil {
+		return mentions, 0, 0, err
+	}
+	edges = tag.RowsAffected()
+
+	tag, err = s.db.Exec(ctx, `DELETE FROM memory_associations WHERE source_memory_id = ANY($1) OR target_memory_id = ANY($1)`, memoryIDs)
+	if err != nil {
+		return mentions, edges, 0, err
+	}
+	assocs = tag.RowsAffected()
+	return mentions, edges, assocs, nil
+}
+
+// ScrubAnchorEntity erases the subject entity's identity in place: name, aliases,
+// metadata, external id and embedding are cleared (the row remains for audit/FK
+// integrity, but no PII survives). Name is set to a unique tombstone to satisfy
+// the (agent_id, name, entity_type) uniqueness constraint.
+func (s *MemoryStore) ScrubAnchorEntity(ctx context.Context, anchorID, tenantID uuid.UUID) error {
+	_, err := s.db.Exec(ctx, `
+		UPDATE entities
+		SET name = 'erased-' || id::text,
+		    aliases = '{}',
+		    metadata = '{}'::jsonb,
+		    external_id = NULL,
+		    embedding = NULL,
+		    updated_at = NOW()
+		WHERE id = $1 AND tenant_id = $2`,
+		anchorID, tenantID,
+	)
+	return err
 }
 
 func (s *MemoryStore) ListCanon(ctx context.Context, tenantID uuid.UUID, limit int) ([]domain.Memory, error) {
@@ -357,6 +499,8 @@ func (s *MemoryStore) Recall(ctx context.Context, embedding []float32, agentID u
 
 	conditions = append(conditions, "embedding IS NOT NULL")
 	conditions = append(conditions, "is_archived = FALSE")
+	// Provenance Firewall: quarantined (untrusted) traces never surface in recall.
+	conditions = append(conditions, "binding <> 'quarantine'")
 
 	if opts.MemoryType != nil {
 		conditions = append(conditions, fmt.Sprintf("type = $%d", len(args)+1))
@@ -478,7 +622,6 @@ func (s *MemoryStore) RecallExhaustive(ctx context.Context, queryEmbedding []flo
 	pageSize := 1000
 	offset := 0
 
-
 	// No-anchor recall must exclude session-bound rows too: anonymous-session
 	// memories have anchor_id NULL but belong to one conversation only
 	// (mirrors the default branch in Recall).
@@ -497,7 +640,7 @@ func (s *MemoryStore) RecallExhaustive(ctx context.Context, queryEmbedding []flo
 			        reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at,
 			        embedding
 			 FROM memories
-			 WHERE agent_id = $1 AND tenant_id = $2 AND embedding IS NOT NULL AND is_archived = FALSE %s
+			 WHERE agent_id = $1 AND tenant_id = $2 AND embedding IS NOT NULL AND is_archived = FALSE AND binding <> 'quarantine' %s
 			 ORDER BY created_at
 			 LIMIT $3 OFFSET $4`, anchorClause),
 			queryArgs...,
@@ -604,7 +747,7 @@ func (s *MemoryStore) RecallHybrid(ctx context.Context, query string, queryEmbed
 		       m.reinforcement_count, m.decay_rate, m.last_accessed_at, m.access_count,
 		       m.created_at, m.updated_at, r.rrf_score AS score
 		FROM rrf r JOIN memories m ON m.id = r.id
-		WHERE m.is_archived = FALSE
+		WHERE m.is_archived = FALSE AND m.binding <> 'quarantine'
 		ORDER BY r.rrf_score DESC
 		LIMIT $5
 	`, typeCondition, anchorCondition, typeCondition, anchorCondition)
@@ -729,7 +872,7 @@ func (s *MemoryStore) FindSimilar(ctx context.Context, agentID uuid.UUID, tenant
 		        embedding::text,
 		        1 - (embedding <=> $1) AS score
 		 FROM memories
-		 WHERE agent_id = $2 AND tenant_id = $3 AND embedding IS NOT NULL AND is_archived = FALSE AND 1 - (embedding <=> $1) >= $4
+		 WHERE agent_id = $2 AND tenant_id = $3 AND embedding IS NOT NULL AND is_archived = FALSE AND binding <> 'quarantine' AND 1 - (embedding <=> $1) >= $4
 		 ORDER BY score DESC`,
 		vec, agentID, tenantID, threshold,
 	)
@@ -829,6 +972,27 @@ func (s *MemoryStore) UpdateConfidence(ctx context.Context, id uuid.UUID, confid
 	return nil
 }
 
+// ApplyConfidenceDelta atomically adjusts confidence by delta, clamped to
+// [0, 0.99]. Applying decay as a relative delta (rather than an absolute SET
+// from a stale snapshot) lets it compose with concurrent recall boosts
+// (IncrementAccessAndBoost) without either write clobbering the other.
+func (s *MemoryStore) ApplyConfidenceDelta(ctx context.Context, id uuid.UUID, delta float32) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE memories
+		 SET confidence = GREATEST(0, LEAST(confidence + $2, 0.99)),
+		     updated_at = NOW()
+		 WHERE id = $1`,
+		id, delta,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // UpdateContent replaces a memory's content (admin correction). When a new
 // embedding is provided it is updated too; otherwise the existing embedding is
 // left in place.
@@ -892,7 +1056,7 @@ const decayBatchLimit = 10000
 func (s *MemoryStore) GetByAgentForDecay(ctx context.Context, agentID uuid.UUID) ([]domain.Memory, error) {
 	rows, err := s.db.Query(ctx,
 		`SELECT id, agent_id, tenant_id, type, content, embedding, embedding_provider, embedding_model, source, provenance, confidence, metadata, expires_at, last_verified_at, reinforcement_count, decay_rate, last_accessed_at, access_count, created_at, updated_at
-		 FROM memories WHERE agent_id = $1 AND is_archived = FALSE
+		 FROM memories WHERE agent_id = $1 AND is_archived = FALSE AND binding <> 'quarantine'
 		 ORDER BY last_accessed_at ASC NULLS FIRST
 		 LIMIT $2`,
 		agentID, decayBatchLimit,
@@ -913,6 +1077,69 @@ func (s *MemoryStore) GetByAgentForDecay(ctx context.Context, agentID uuid.UUID)
 		memories = append(memories, m)
 	}
 	return memories, rows.Err()
+}
+
+// ListQuarantined returns the firewall review queue for an agent, newest first,
+// with the quarantine reason/time populated.
+func (s *MemoryStore) ListQuarantined(ctx context.Context, agentID, tenantID uuid.UUID, limit, offset int) ([]domain.Memory, int, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	var total int
+	if err := s.db.QueryRow(ctx,
+		`SELECT COUNT(*) FROM memories WHERE agent_id = $1 AND tenant_id = $2 AND binding = 'quarantine' AND is_archived = FALSE`,
+		agentID, tenantID,
+	).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	rows, err := s.db.Query(ctx,
+		`SELECT id, agent_id, tenant_id, type, content, provenance, confidence, source, metadata,
+		        anchor_id, session_id, quarantine_reason, quarantined_at, created_at
+		 FROM memories
+		 WHERE agent_id = $1 AND tenant_id = $2 AND binding = 'quarantine' AND is_archived = FALSE
+		 ORDER BY created_at DESC
+		 LIMIT $3 OFFSET $4`,
+		agentID, tenantID, limit, offset,
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	var out []domain.Memory
+	for rows.Next() {
+		var m domain.Memory
+		var reason *string
+		if err := rows.Scan(&m.ID, &m.AgentID, &m.TenantID, &m.Type, &m.Content, &m.Provenance, &m.Confidence, &m.Source, &m.Metadata,
+			&m.AnchorID, &m.SessionID, &reason, &m.QuarantinedAt, &m.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		if reason != nil {
+			m.QuarantineReason = *reason
+		}
+		m.Binding = domain.BindingQuarantine
+		out = append(out, m)
+	}
+	return out, total, rows.Err()
+}
+
+// ReleaseQuarantine promotes a quarantined trace to its computed real binding and
+// clears the quarantine metadata.
+func (s *MemoryStore) ReleaseQuarantine(ctx context.Context, id, tenantID uuid.UUID, newBinding domain.MemoryBinding) error {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE memories
+		 SET binding = $3::memory_binding, quarantine_reason = NULL, quarantined_at = NULL, updated_at = NOW()
+		 WHERE id = $1 AND tenant_id = $2 AND binding = 'quarantine'`,
+		id, tenantID, string(newBinding),
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *MemoryStore) Archive(ctx context.Context, id uuid.UUID) error {

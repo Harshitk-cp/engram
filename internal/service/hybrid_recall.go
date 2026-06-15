@@ -10,12 +10,12 @@ import (
 )
 
 type HybridRecallService struct {
-	memoryStore    domain.MemoryStore
-	graphStore     domain.GraphStore
-	entityStore    domain.EntityStore
-	sessionStore   domain.SessionStore
+	memoryStore     domain.MemoryStore
+	graphStore      domain.GraphStore
+	entityStore     domain.EntityStore
+	sessionStore    domain.SessionStore
 	embeddingClient domain.EmbeddingClient
-	llmClient      domain.LLMClient
+	llmClient       domain.LLMClient
 }
 
 func NewHybridRecallService(
@@ -26,11 +26,11 @@ func NewHybridRecallService(
 	llmClient domain.LLMClient,
 ) *HybridRecallService {
 	return &HybridRecallService{
-		memoryStore:    memoryStore,
-		graphStore:     graphStore,
-		entityStore:    entityStore,
+		memoryStore:     memoryStore,
+		graphStore:      graphStore,
+		entityStore:     entityStore,
 		embeddingClient: embeddingClient,
-		llmClient:      llmClient,
+		llmClient:       llmClient,
 	}
 }
 

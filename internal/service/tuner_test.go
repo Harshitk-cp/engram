@@ -270,9 +270,9 @@ func TestTunerService_RunForAgent_MinWeightFloor(t *testing.T) {
 
 	for i := 0; i < 15; i++ {
 		feedbackStore.feedbacks = append(feedbackStore.feedbacks, domain.Feedback{
-			ID:       uuid.New(),
-			MemoryID: uuid.New(),
-			AgentID:  agentID,
+			ID:         uuid.New(),
+			MemoryID:   uuid.New(),
+			AgentID:    agentID,
 			SignalType: domain.FeedbackTypeIgnored,
 		})
 	}
@@ -300,9 +300,9 @@ func TestTunerService_RunForAgent_NoPolicyCreatesDefault(t *testing.T) {
 	// No initial policy — tuner should create a default and adjust it
 	for i := 0; i < 15; i++ {
 		feedbackStore.feedbacks = append(feedbackStore.feedbacks, domain.Feedback{
-			ID:       uuid.New(),
-			MemoryID: uuid.New(),
-			AgentID:  agentID,
+			ID:         uuid.New(),
+			MemoryID:   uuid.New(),
+			AgentID:    agentID,
 			SignalType: domain.FeedbackTypeHelpful,
 		})
 	}
@@ -339,15 +339,15 @@ func TestTunerService_RunAll(t *testing.T) {
 	// Add feedback for two agents
 	for i := 0; i < 15; i++ {
 		feedbackStore.feedbacks = append(feedbackStore.feedbacks, domain.Feedback{
-			ID:       uuid.New(),
-			MemoryID: uuid.New(),
-			AgentID:  agentID1,
+			ID:         uuid.New(),
+			MemoryID:   uuid.New(),
+			AgentID:    agentID1,
 			SignalType: domain.FeedbackTypeHelpful,
 		})
 		feedbackStore.feedbacks = append(feedbackStore.feedbacks, domain.Feedback{
-			ID:       uuid.New(),
-			MemoryID: uuid.New(),
-			AgentID:  agentID2,
+			ID:         uuid.New(),
+			MemoryID:   uuid.New(),
+			AgentID:    agentID2,
 			SignalType: domain.FeedbackTypeIgnored,
 		})
 	}

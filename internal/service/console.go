@@ -95,9 +95,9 @@ func (s *ConsoleService) Memories(ctx context.Context, agentID, tenantID uuid.UU
 
 // Snapshot is the agent's belief set reconstructed as of a past instant.
 type Snapshot struct {
-	AsOf     time.Time            `json:"as_of"`
-	Total    int                  `json:"total"`
-	Beliefs  []domain.BeliefAtTime `json:"beliefs"`
+	AsOf    time.Time             `json:"as_of"`
+	Total   int                   `json:"total"`
+	Beliefs []domain.BeliefAtTime `json:"beliefs"`
 }
 
 // SnapshotAsOf reconstructs what the agent believed at `at` (transaction time).

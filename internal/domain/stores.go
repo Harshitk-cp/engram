@@ -47,7 +47,7 @@ type RecallMode string
 const (
 	RecallModeSimilarity RecallMode = "similarity"
 	RecallModeExhaustive RecallMode = "exhaustive"
-	RecallModeHybrid RecallMode = "hybrid"
+	RecallModeHybrid     RecallMode = "hybrid"
 )
 
 type RecallOpts struct {
@@ -57,15 +57,15 @@ type RecallOpts struct {
 	Scoring       ScoringMode
 	Explain       bool
 	IncludeTiers  []MemoryTier
-	RecencyBoost float32
+	RecencyBoost  float32
 	EventDateFrom *time.Time
 	EventDateTo   *time.Time
-	Mode RecallMode
+	Mode          RecallMode
 	MinSimilarity float32
-	MaxResults int
-	AnchorID *uuid.UUID
-	SessionID *uuid.UUID
-	Binding *MemoryBinding
+	MaxResults    int
+	AnchorID      *uuid.UUID
+	SessionID     *uuid.UUID
+	Binding       *MemoryBinding
 }
 
 type MemoryWithScore struct {
@@ -108,6 +108,10 @@ type MemoryStore interface {
 	GetRecentByType(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, memType MemoryType, limit int) ([]MemoryWithScore, error)
 	UpdateReinforcement(ctx context.Context, id uuid.UUID, confidence float32, reinforcementCount int) error
 	UpdateConfidence(ctx context.Context, id uuid.UUID, confidence float32) error
+	// ApplyConfidenceDelta atomically adjusts confidence by delta (clamped to
+	// [0,1]) so concurrent decay (negative delta) and recall boosts compose
+	// without one clobbering the other's read-modify-write.
+	ApplyConfidenceDelta(ctx context.Context, id uuid.UUID, delta float32) error
 	// Admin correction methods
 	UpdateContent(ctx context.Context, id uuid.UUID, content string, embedding []float32) error
 	RedactContent(ctx context.Context, id uuid.UUID, tombstone string) error
@@ -119,6 +123,9 @@ type MemoryStore interface {
 	GetByAgentForDecay(ctx context.Context, agentID uuid.UUID) ([]Memory, error)
 	Archive(ctx context.Context, id uuid.UUID) error
 	Restore(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error
+	// Provenance Firewall
+	ListQuarantined(ctx context.Context, agentID, tenantID uuid.UUID, limit, offset int) ([]Memory, int, error)
+	ReleaseQuarantine(ctx context.Context, id, tenantID uuid.UUID, newBinding MemoryBinding) error
 	GetByIDOnly(ctx context.Context, id uuid.UUID) (*Memory, error)
 	IncrementAccessAndBoost(ctx context.Context, id uuid.UUID, boost float32) error
 	// Tier methods
@@ -360,8 +367,8 @@ type WorkingMemoryStore interface {
 // MemoryAssociationStore handles cross-memory associations for spreading activation.
 type MemoryAssociationStore interface {
 	Create(ctx context.Context, a *MemoryAssociation) error
-	GetBySource(ctx context.Context, sourceType ActivatedMemoryType, sourceID uuid.UUID) ([]MemoryAssociation, error)
-	GetByTarget(ctx context.Context, targetType ActivatedMemoryType, targetID uuid.UUID) ([]MemoryAssociation, error)
+	GetBySource(ctx context.Context, tenantID uuid.UUID, sourceType ActivatedMemoryType, sourceID uuid.UUID) ([]MemoryAssociation, error)
+	GetByTarget(ctx context.Context, tenantID uuid.UUID, targetType ActivatedMemoryType, targetID uuid.UUID) ([]MemoryAssociation, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 	UpdateStrength(ctx context.Context, id uuid.UUID, strength float32) error
 }

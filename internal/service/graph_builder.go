@@ -6,6 +6,7 @@ import (
 
 	"github.com/Harshitk-cp/engram/internal/domain"
 	"github.com/google/uuid"
+	"go.uber.org/zap"
 )
 
 const (
@@ -18,6 +19,7 @@ type GraphBuilderService struct {
 	entityStore     domain.EntityStore
 	embeddingClient domain.EmbeddingClient
 	llmClient       domain.LLMClient
+	logger          *zap.Logger
 }
 
 func NewGraphBuilderService(
@@ -26,13 +28,18 @@ func NewGraphBuilderService(
 	entityStore domain.EntityStore,
 	embeddingClient domain.EmbeddingClient,
 	llmClient domain.LLMClient,
+	logger *zap.Logger,
 ) *GraphBuilderService {
+	if logger == nil {
+		logger = zap.NewNop()
+	}
 	return &GraphBuilderService{
 		memoryStore:     memoryStore,
 		graphStore:      graphStore,
 		entityStore:     entityStore,
 		embeddingClient: embeddingClient,
 		llmClient:       llmClient,
+		logger:          logger,
 	}
 }
 
@@ -49,11 +56,16 @@ func (s *GraphBuilderService) OnMemoryCreated(ctx context.Context, memory *domai
 	// 1. Extract entities
 	if s.llmClient != nil {
 		if err := s.extractAndLinkEntities(ctx, memory); err != nil {
-			// Log but don't fail
+			s.logger.Warn("entity extraction failed",
+				zap.String("memory_id", memory.ID.String()), zap.Error(err))
 		}
 		if err := s.detectAndCreateRelationships(ctx, memory); err != nil {
-			// Log but don't fail
+			s.logger.Warn("relationship detection failed",
+				zap.String("memory_id", memory.ID.String()), zap.Error(err))
 		}
+	} else {
+		s.logger.Debug("graph entity extraction skipped: no LLM client configured",
+			zap.String("memory_id", memory.ID.String()))
 	}
 
 	// 2. Thematic links

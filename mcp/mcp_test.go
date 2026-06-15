@@ -619,8 +619,8 @@ func TestResourcesRead_Memories(t *testing.T) {
 func TestResourcesRead_Health(t *testing.T) {
 	mock := newMock(t)
 	mock.healthResp = map[string]interface{}{
-		"semantic_count":     12,
-		"average_confidence": 0.82,
+		"semantic_count":      12,
+		"average_confidence":  0.82,
 		"contradiction_count": 1,
 	}
 	srv := mock.server()
@@ -1149,9 +1149,9 @@ func TestFormatMemoriesIDs(t *testing.T) {
 	mock.recallResp = map[string]interface{}{
 		"memories": []interface{}{
 			map[string]interface{}{
-				"id": "550e8400-e29b-41d4-a716-446655440000",
+				"id":      "550e8400-e29b-41d4-a716-446655440000",
 				"content": "Important fact",
-				"type": "fact", "confidence": 0.8, "score": 0.75,
+				"type":    "fact", "confidence": 0.8, "score": 0.75,
 			},
 		},
 	}

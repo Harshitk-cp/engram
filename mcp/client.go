@@ -14,10 +14,10 @@ import (
 
 // Client is an HTTP client for the Engram API.
 type Client struct {
-	baseURL  string
-	apiKey   string
-	agentID  string
-	http     *http.Client
+	baseURL string
+	apiKey  string
+	agentID string
+	http    *http.Client
 }
 
 // NewClient creates an Engram API client.
@@ -35,13 +35,15 @@ func (c *Client) AgentID() string { return c.agentID }
 
 // MemoryResult is returned by Remember.
 type MemoryResult struct {
-	ID         string  `json:"id"`
-	Content    string  `json:"content"`
-	Type       string  `json:"type"`
-	Confidence float64 `json:"confidence"`
-	Tier       string  `json:"tier"`
-	TierReason string  `json:"tier_reason"`
-	Reinforced bool    `json:"reinforced"`
+	ID               string  `json:"id"`
+	Content          string  `json:"content"`
+	Type             string  `json:"type"`
+	Confidence       float64 `json:"confidence"`
+	Tier             string  `json:"tier"`
+	TierReason       string  `json:"tier_reason"`
+	Reinforced       bool    `json:"reinforced"`
+	Quarantined      bool    `json:"quarantined"`
+	QuarantineReason string  `json:"quarantine_reason"`
 }
 
 // RecallMemory is a single memory in a recall result.
@@ -65,7 +67,7 @@ type AgentResult struct {
 // Remember stores a memory in Engram. confidence=0 lets the server assign the
 // default. anchor is the caller's own id for who/what the memory is about; when
 // set, the trace is bound to that anchor (which must already exist).
-func (c *Client) Remember(ctx context.Context, agentID, content, memType, source, anchor, session string, confidence float32) (*MemoryResult, error) {
+func (c *Client) Remember(ctx context.Context, agentID, content, memType, source, anchor, session string, confidence float32, quarantine bool) (*MemoryResult, error) {
 	if agentID == "" {
 		agentID = c.agentID
 	}
@@ -73,6 +75,9 @@ func (c *Client) Remember(ctx context.Context, agentID, content, memType, source
 		"agent_id": agentID,
 		"content":  content,
 		"source":   source,
+	}
+	if quarantine {
+		body["quarantine"] = true
 	}
 	// `source` carries the belief's origin (user/agent/inferred/tool); send it as
 	// provenance too so the server records it and derives the initial confidence.

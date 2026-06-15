@@ -67,6 +67,7 @@ var (
 	ErrMemoryAgentIDMissing = errors.New("agent_id is required")
 	ErrRecallQueryEmpty     = errors.New("query is required")
 	ErrRecallAgentIDMissing = errors.New("agent_id is required for recall")
+	ErrNotQuarantined       = errors.New("memory is not quarantined")
 )
 
 type PolicyEnforcer interface {
@@ -80,7 +81,7 @@ const (
 	ContradictionCandidateThreshold = 0.25
 	// typeAwareCandidateLimit is the maximum number of same-type memories retrieved as
 	typeAwareCandidateLimit = 15
-	ReinforcementThreshold = 0.85
+	ReinforcementThreshold  = 0.85
 	// ReinforcementConfidenceBoost is added to confidence when a belief is reinforced.
 	ReinforcementConfidenceBoost = 0.05
 	// MaxConfidence is the maximum confidence value.
@@ -91,8 +92,13 @@ const (
 	MinConfidence = 0.1
 	// NewContradictingBeliefConfidence is the starting confidence for a contradicting belief.
 	NewContradictingBeliefConfidence = 0.7
-	// DefaultRecallMinConfidence is the default minimum confidence for recall.
-	DefaultRecallMinConfidence = 0.6
+	// DefaultRecallMinConfidence is the default minimum confidence for recall. It
+	// is aligned with the Warm-tier floor (>0.70) so the confidence gate and the
+	// default tier window ({Hot, Warm}) agree instead of silently contradicting
+	// each other — a memory that passes the floor is in a recalled tier and vice
+	// versa. Speculative beliefs (inferred/derived, <0.70) are opt-in via a lower
+	// MinConfidence or explicit IncludeTiers.
+	DefaultRecallMinConfidence = 0.70
 	// UsageReinforcementBoost is the small boost applied when a memory is recalled.
 	UsageReinforcementBoost = 0.02
 	// SessionPromotionThreshold is the reinforcement count at which a recurring
@@ -100,7 +106,7 @@ const (
 )
 
 func sameScopeCandidates(candidates []domain.MemoryWithScore, m *domain.Memory) []domain.MemoryWithScore {
-	out := candidates[:0]
+	out := make([]domain.MemoryWithScore, 0, len(candidates))
 	for _, c := range candidates {
 		if sameUUIDPtr(c.AnchorID, m.AnchorID) && sameUUIDPtr(c.SessionID, m.SessionID) {
 			out = append(out, c)
@@ -136,6 +142,7 @@ type MemoryService struct {
 	contradictionDetector contradiction.Detector
 	contradictionStore    domain.ContradictionStore
 	mutationLogStore      domain.MutationLogStore
+	settingsStore         domain.TenantSettingsStore // optional; nil → firewall off
 	uow                   *store.UnitOfWork
 	policyEnforcer        PolicyEnforcer
 	graphBuilder          GraphBuilder
@@ -187,6 +194,13 @@ func (s *MemoryService) SetContradictionStore(cs domain.ContradictionStore) {
 
 func (s *MemoryService) SetMutationLogStore(mls domain.MutationLogStore) {
 	s.mutationLogStore = mls
+}
+
+// SetSettingsStore wires per-tenant settings so the Provenance Firewall can
+// consult the tenant's quarantine policy. When nil, only an explicit per-write
+// quarantine flag takes effect.
+func (s *MemoryService) SetSettingsStore(ts domain.TenantSettingsStore) {
+	s.settingsStore = ts
 }
 
 func (s *MemoryService) SetUnitOfWork(uow *store.UnitOfWork) {
@@ -252,6 +266,10 @@ func (s *MemoryService) SetGraphBuilder(gb GraphBuilder) {
 type CreateResult struct {
 	Reinforced         bool      `json:"reinforced"`
 	ReinforcedMemoryID uuid.UUID `json:"reinforced_memory_id,omitempty"`
+	// Quarantined is true when the Provenance Firewall held this write out of
+	// active memory; QuarantineReason explains why.
+	Quarantined      bool   `json:"quarantined,omitempty"`
+	QuarantineReason string `json:"quarantine_reason,omitempty"`
 }
 
 func (s *MemoryService) Create(ctx context.Context, m *domain.Memory) (*CreateResult, error) {
@@ -303,9 +321,22 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 		}
 	}
 
-	// Default confidence
+	// Default provenance (source trust), then derive the initial confidence from
+	// it when the caller didn't supply one: user 0.9 > tool 0.8 > agent 0.6 >
+	// inferred 0.4. A fresh memory should enter at the trust level of its source
+	// rather than the engine ceiling — entering everything at near-certainty both
+	// contradicts the advertised provenance semantics and pollutes calibration.
+	// Any explicit value is still clamped to DefaultMaxConfidence, since the
+	// log-odds dynamics can't represent more than that (1.0 is +∞ log-odds) and
+	// storing above it would make the first reinforcement appear to lower it.
+	if m.Provenance == "" {
+		m.Provenance = domain.ProvenanceAgent
+	}
 	if m.Confidence == 0 {
-		m.Confidence = 1.0
+		m.Confidence = m.Provenance.InitialConfidence()
+	}
+	if m.Confidence > DefaultMaxConfidence {
+		m.Confidence = DefaultMaxConfidence
 	}
 
 	// Verify agent exists and belongs to tenant
@@ -325,6 +356,23 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 			// Continue without embedding — recall won't find it, but storage still works
 		} else {
 			m.Embedding = emb
+		}
+	}
+
+	// Provenance Firewall: hold untrusted writes OUT of active memory and belief
+	// logic until an admin releases or rejects them (OWASP ASI06 defense). Canon
+	// is operator-curated and trusted, so it's never quarantined. Quarantined
+	// traces keep their would-be anchor/session so release can recompute binding.
+	if m.Binding != domain.BindingCanon {
+		prov := m.Provenance // defaulted above
+		settings := domain.DefaultEngineSettings()
+		if s.settingsStore != nil {
+			if got, err := s.settingsStore.Get(ctx, m.TenantID); err == nil {
+				settings = got
+			}
+		}
+		if quarantine, reason := settings.ShouldQuarantine(prov, m.Quarantine); quarantine {
+			return s.quarantineWrite(ctx, m, reason)
 		}
 	}
 
@@ -397,8 +445,19 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 					return result, nil
 				}
 
-				if reinforcementCandidate == nil && existing.Score >= ReinforcementThreshold {
-					reinforcementCandidate = &similar[i]
+				// Gate reinforcement on the REAL embedding similarity, not
+				// existing.Score: type-fetched candidates (GetRecentByType) carry a
+				// placeholder score of 1.0, so trusting Score here merges any two
+				// memories of the same type regardless of topic (e.g. a café
+				// preference falsely reinforcing "prefers async communication").
+				if reinforcementCandidate == nil {
+					sim := existing.Score
+					if len(m.Embedding) > 0 && len(existing.Embedding) > 0 {
+						sim = cosineSimilarity(m.Embedding, existing.Embedding)
+					}
+					if sim >= ReinforcementThreshold {
+						reinforcementCandidate = &similar[i]
+					}
 				}
 			}
 
@@ -418,7 +477,6 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 					m.UpdatedAt = reinforcementCandidate.UpdatedAt
 					result.Reinforced = true
 					result.ReinforcedMemoryID = reinforcementCandidate.ID
-
 
 					if reinforcementCandidate.Binding == domain.BindingSession &&
 						reinforcementCandidate.AnchorID != nil &&
@@ -450,7 +508,9 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 		}
 	}
 
-	// Build graph edges for hybrid retrieval (non-blocking)
+	// Build graph edges for hybrid retrieval. This runs synchronously in the
+	// create path (it calls the LLM for entity extraction), so it adds latency to
+	// writes; failures are non-fatal and logged.
 	if s.graphBuilder != nil {
 		if err := s.graphBuilder.OnMemoryCreated(ctx, m); err != nil {
 			s.logger.Warn("graph building failed after memory creation", zap.Error(err))
@@ -458,6 +518,112 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 	}
 
 	return result, nil
+}
+
+// quarantineWrite stores an untrusted trace as quarantined (out of recall/belief
+// logic) and records the decision in the audit chain.
+func (s *MemoryService) quarantineWrite(ctx context.Context, m *domain.Memory, reason string) (*CreateResult, error) {
+	m.Binding = domain.BindingQuarantine
+	m.QuarantineReason = reason
+	now := time.Now()
+	m.QuarantinedAt = &now
+
+	if err := s.memoryStore.Create(ctx, m); err != nil {
+		return nil, err
+	}
+
+	s.logQuarantineMutation(ctx, m, domain.MutationQuarantine, "quarantine: "+reason)
+	s.logger.Info("write quarantined by firewall",
+		zap.String("memory_id", m.ID.String()),
+		zap.String("provenance", string(m.Provenance)),
+		zap.String("reason", reason))
+
+	return &CreateResult{Quarantined: true, QuarantineReason: reason}, nil
+}
+
+// ReleaseQuarantine promotes a quarantined trace into active memory by recomputing
+// its real binding from the ids it carries, and records the release in the audit
+// chain. Returns the updated memory.
+func (s *MemoryService) ReleaseQuarantine(ctx context.Context, id, tenantID uuid.UUID, note string) (*domain.Memory, error) {
+	m, err := s.memoryStore.GetByID(ctx, id, tenantID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, ErrMemoryNotFound
+		}
+		return nil, err
+	}
+	if m.Binding != domain.BindingQuarantine {
+		return nil, ErrNotQuarantined
+	}
+
+	newBinding := domain.ComputeMemoryBinding(m.AnchorID, m.SessionID)
+	if err := s.memoryStore.ReleaseQuarantine(ctx, id, tenantID, newBinding); err != nil {
+		return nil, err
+	}
+	m.Binding = newBinding
+	m.QuarantineReason = ""
+	m.QuarantinedAt = nil
+
+	reason := "release: admitted to active memory"
+	if note != "" {
+		reason = "release: " + note
+	}
+	s.logQuarantineMutation(ctx, m, domain.MutationQuarantineRelease, reason)
+	return m, nil
+}
+
+// RejectQuarantine permanently deletes a quarantined trace, recording the
+// rejection (with a content snapshot) in the audit chain first.
+func (s *MemoryService) RejectQuarantine(ctx context.Context, id, tenantID uuid.UUID, note string) error {
+	m, err := s.memoryStore.GetByID(ctx, id, tenantID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ErrMemoryNotFound
+		}
+		return err
+	}
+	if m.Binding != domain.BindingQuarantine {
+		return ErrNotQuarantined
+	}
+
+	reason := "reject: discarded untrusted write"
+	if note != "" {
+		reason = "reject: " + note
+	}
+	s.logQuarantineMutation(ctx, m, domain.MutationQuarantineReject, reason)
+
+	return s.memoryStore.Delete(ctx, id, tenantID)
+}
+
+// ListQuarantine returns the quarantine review queue for an agent.
+func (s *MemoryService) ListQuarantine(ctx context.Context, agentID, tenantID uuid.UUID, limit, offset int) ([]domain.Memory, int, error) {
+	return s.memoryStore.ListQuarantined(ctx, agentID, tenantID, limit, offset)
+}
+
+// logQuarantineMutation writes a firewall decision to the tamper-evident audit
+// chain. Best-effort: a logging failure never blocks the operation.
+func (s *MemoryService) logQuarantineMutation(ctx context.Context, m *domain.Memory, mt domain.MutationType, reason string) {
+	if s.mutationLogStore == nil {
+		return
+	}
+	tenantID := m.TenantID
+	entry := &domain.MutationLog{
+		MemoryID:     m.ID,
+		AgentID:      m.AgentID,
+		TenantID:     &tenantID,
+		MutationType: mt,
+		SourceType:   domain.MutationSourceSystem,
+		Reason:       reason,
+		Binding:      string(m.Binding),
+		AnchorID:     m.AnchorID,
+	}
+	if mt == domain.MutationQuarantineReject {
+		snapshot := m.Content
+		entry.ContentSnapshot = &snapshot
+	}
+	if err := s.mutationLogStore.Create(ctx, entry); err != nil {
+		s.logger.Warn("failed to log firewall mutation", zap.String("memory_id", m.ID.String()), zap.Error(err))
+	}
 }
 
 func (s *MemoryService) GetByID(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) (*domain.Memory, error) {

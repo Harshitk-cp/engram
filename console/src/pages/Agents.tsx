@@ -24,7 +24,7 @@ export default function Agents() {
     setBusy(true);
     setErr(null);
     try {
-      const agent = await Api.createAgent(extId.trim(), name.trim() || extId.trim());
+      const agent = await Api.createAgent(name.trim() || extId.trim(), extId.trim() || undefined);
       nav(`/agents/${agent.id}`);
     } catch (e2) {
       setErr(e2 instanceof Error ? e2.message : "Failed to create agent");
@@ -48,14 +48,14 @@ export default function Agents() {
           <form onSubmit={create}>
             <div className="row wrap" style={{ alignItems: "flex-end", gap: 14 }}>
               <div style={{ flex: 1, minWidth: 200 }}>
-                <label>External ID (your stable identifier)</label>
-                <input placeholder="e.g. claude-desktop" value={extId} onChange={(e) => setExtId(e.target.value)} autoFocus />
+                <label>Display name</label>
+                <input placeholder="e.g. Claude Desktop Agent" value={name} onChange={(e) => setName(e.target.value)} autoFocus />
               </div>
               <div style={{ flex: 1, minWidth: 200 }}>
-                <label>Display name</label>
-                <input placeholder="e.g. Claude Desktop Agent" value={name} onChange={(e) => setName(e.target.value)} />
+                <label>External ID (optional — your stable identifier)</label>
+                <input placeholder="auto-generated from name if blank" value={extId} onChange={(e) => setExtId(e.target.value)} />
               </div>
-              <button type="submit" disabled={busy || !extId.trim()}>{busy ? "Creating…" : "Create"}</button>
+              <button type="submit" disabled={busy || !(name.trim() || extId.trim())}>{busy ? "Creating…" : "Create"}</button>
             </div>
             {err && <div className="error-box" style={{ marginTop: 12 }}>{err}</div>}
           </form>

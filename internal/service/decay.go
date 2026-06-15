@@ -57,7 +57,7 @@ type BatchDecayResult struct {
 	EpisodesDecayed  int                     `json:"episodes_decayed"`
 	EpisodesArchived int                     `json:"episodes_archived"`
 	TierTransitions  []domain.TierTransition `json:"tier_transitions,omitempty"`
-	Details          []DecayResult  `json:"details,omitempty"`
+	Details          []DecayResult           `json:"details,omitempty"`
 }
 
 // DecayService implements competition-aware memory decay
@@ -65,6 +65,7 @@ type DecayService struct {
 	memoryStore      domain.MemoryStore
 	episodeStore     domain.EpisodeStore
 	mutationLogStore domain.MutationLogStore
+	settings         domain.TenantSettingsStore // optional; nil → service defaults
 	uow              *store.UnitOfWork
 	logger           *zap.Logger
 
@@ -103,6 +104,49 @@ func (s *DecayService) SetInterval(d time.Duration) {
 
 func (s *DecayService) SetMutationLogStore(mls domain.MutationLogStore) {
 	s.mutationLogStore = mls
+}
+
+// SetSettingsStore wires per-tenant engine tuning. When set, BatchDecay uses the
+// tenant's configured decay rate / floor / archive threshold / competition
+// weight instead of the service defaults.
+func (s *DecayService) SetSettingsStore(ts domain.TenantSettingsStore) {
+	s.settings = ts
+}
+
+// effDecay is the effective set of decay parameters for one batch (either the
+// service defaults or a tenant's configured overrides).
+type effDecay struct {
+	baseRate          float64
+	floor             float64
+	archiveThreshold  float64
+	competitionWeight float64
+}
+
+func (s *DecayService) defaultEff() effDecay {
+	return effDecay{
+		baseRate:          s.BaseDecayRate,
+		floor:             s.Floor,
+		archiveThreshold:  ArchiveThreshold,
+		competitionWeight: s.CompetitionWeight,
+	}
+}
+
+// effFor resolves the effective decay parameters for a tenant, falling back to
+// service defaults when no settings store is wired or on error.
+func (s *DecayService) effFor(ctx context.Context, tenantID uuid.UUID) effDecay {
+	if s.settings == nil || tenantID == uuid.Nil {
+		return s.defaultEff()
+	}
+	es, err := s.settings.Get(ctx, tenantID)
+	if err != nil {
+		return s.defaultEff()
+	}
+	return effDecay{
+		baseRate:          es.DecayBaseRate,
+		floor:             es.DecayFloor,
+		archiveThreshold:  es.ArchiveThreshold,
+		competitionWeight: es.CompetitionWeight,
+	}
 }
 
 func (s *DecayService) SetUnitOfWork(uow *store.UnitOfWork) {
@@ -144,7 +188,10 @@ func (s *DecayService) applyDecayWrite(ctx context.Context, mem *domain.Memory, 
 		if archived {
 			return mem.Archive(ctx, dr.MemoryID)
 		}
-		return mem.UpdateConfidence(ctx, dr.MemoryID, dr.NewConfidence)
+		// Apply decay as a relative delta (NewConfidence - OldConfidence, <= 0)
+		// rather than an absolute SET from the stale snapshot, so a recall boost
+		// landing between the snapshot read and this write is not clobbered.
+		return mem.ApplyConfidenceDelta(ctx, dr.MemoryID, dr.NewConfidence-dr.OldConfidence)
 	}
 
 	if s.uow != nil {
@@ -172,7 +219,7 @@ func (s *DecayService) applyDecayWrite(ctx context.Context, mem *domain.Memory, 
 // domain interface and the tx-bound store satisfy it.
 type domainMemoryWriter interface {
 	Archive(ctx context.Context, id uuid.UUID) error
-	UpdateConfidence(ctx context.Context, id uuid.UUID, confidence float32) error
+	ApplyConfidenceDelta(ctx context.Context, id uuid.UUID, delta float32) error
 }
 
 // Start begins the background decay worker
@@ -249,8 +296,14 @@ func (s *DecayService) runDecayAllAgents(ctx context.Context) {
 	}
 }
 
-// ApplyDecay applies decay to a single memory
+// ApplyDecay applies decay to a single memory using the service defaults.
 func (s *DecayService) ApplyDecay(ctx context.Context, memory *domain.Memory, allMemories []domain.Memory) *DecayResult {
+	return s.applyDecayEff(ctx, memory, allMemories, s.defaultEff())
+}
+
+// applyDecayEff is the core decay computation, parameterized by the effective
+// (possibly per-tenant) decay settings.
+func (s *DecayService) applyDecayEff(ctx context.Context, memory *domain.Memory, allMemories []domain.Memory, eff effDecay) *DecayResult {
 	result := &DecayResult{
 		MemoryID:      memory.ID,
 		OldConfidence: memory.Confidence,
@@ -274,16 +327,16 @@ func (s *DecayService) ApplyDecay(ctx context.Context, memory *domain.Memory, al
 	competitors := s.findCompetitors(memory, allMemories)
 	result.CompetitorCount = len(competitors)
 
-	competitionFactor := s.calculateCompetition(memory, competitors)
+	competitionFactor := s.calculateCompetition(memory, competitors, eff.competitionWeight)
 	result.CompetitionFactor = competitionFactor
 
-	effectiveDecay := s.BaseDecayRate * (1 + competitionFactor)
+	effectiveDecay := eff.baseRate * (1 + competitionFactor)
 	result.EffectiveDecay = effectiveDecay
 
 	// Distance-to-floor decay: conf_new = floor + (conf - floor) × exp(-λ_eff × t)
-	distanceToFloor := float64(memory.Confidence) - s.Floor
+	distanceToFloor := float64(memory.Confidence) - eff.floor
 	decayFactor := math.Exp(-effectiveDecay * hoursSinceAccess)
-	newConfidence := s.Floor + distanceToFloor*decayFactor
+	newConfidence := eff.floor + distanceToFloor*decayFactor
 
 	// Apply reinforcement bonus (well-reinforced memories resist decay)
 	if memory.ReinforcementCount > 0 {
@@ -294,8 +347,8 @@ func (s *DecayService) ApplyDecay(ctx context.Context, memory *domain.Memory, al
 		newConfidence = newConfidence + (float64(memory.Confidence)-newConfidence)*resistanceFactor
 	}
 
-	if newConfidence < s.Floor {
-		newConfidence = s.Floor
+	if newConfidence < eff.floor {
+		newConfidence = eff.floor
 	}
 	if newConfidence > float64(memory.Confidence) {
 		newConfidence = float64(memory.Confidence)
@@ -303,7 +356,7 @@ func (s *DecayService) ApplyDecay(ctx context.Context, memory *domain.Memory, al
 
 	result.NewConfidence = float32(newConfidence)
 
-	if result.NewConfidence < ArchiveThreshold {
+	if result.NewConfidence < float32(eff.archiveThreshold) {
 		result.WasArchived = true
 	}
 
@@ -347,7 +400,7 @@ func (s *DecayService) findCompetitors(memory *domain.Memory, allMemories []doma
 }
 
 // calculateCompetition measures how much competing beliefs suppress this one
-func (s *DecayService) calculateCompetition(memory *domain.Memory, competitors []domain.Memory) float64 {
+func (s *DecayService) calculateCompetition(memory *domain.Memory, competitors []domain.Memory, competitionWeight float64) float64 {
 	if len(competitors) == 0 {
 		return 0
 	}
@@ -369,7 +422,7 @@ func (s *DecayService) calculateCompetition(memory *domain.Memory, competitors [
 
 	normalizedCompetition := totalCompetition / (1 + float64(memory.Confidence))
 
-	return s.CompetitionWeight * normalizedCompetition
+	return competitionWeight * normalizedCompetition
 }
 
 // BatchDecay applies decay to all memories for an agent
@@ -389,6 +442,7 @@ func (s *DecayService) BatchDecay(ctx context.Context, agentID uuid.UUID) (*Batc
 	}
 
 	result.Processed = len(memories)
+	eff := s.effFor(ctx, memories[0].TenantID)
 
 	for i := range memories {
 		mem := &memories[i]
@@ -397,7 +451,7 @@ func (s *DecayService) BatchDecay(ctx context.Context, agentID uuid.UUID) (*Batc
 			continue
 		}
 
-		decayResult := s.ApplyDecay(ctx, mem, memories)
+		decayResult := s.applyDecayEff(ctx, mem, memories, eff)
 
 		confidenceDelta := math.Abs(float64(decayResult.NewConfidence - decayResult.OldConfidence))
 		if confidenceDelta < 0.001 {
@@ -438,7 +492,7 @@ func (s *DecayService) BatchDecay(ctx context.Context, agentID uuid.UUID) (*Batc
 			result.EpisodesDecayed = int(decayed)
 		}
 
-		weakEpisodes, err := s.episodeStore.GetWeakMemories(ctx, agentID, ArchiveThreshold)
+		weakEpisodes, err := s.episodeStore.GetWeakMemories(ctx, agentID, float32(eff.archiveThreshold))
 		if err != nil {
 			s.logger.Debug("failed to get weak episodes", zap.Error(err))
 		} else {
@@ -472,6 +526,7 @@ func (s *DecayService) BatchDecayWithDetails(ctx context.Context, agentID uuid.U
 	}
 
 	result.Processed = len(memories)
+	eff := s.effFor(ctx, memories[0].TenantID)
 
 	for i := range memories {
 		mem := &memories[i]
@@ -480,7 +535,7 @@ func (s *DecayService) BatchDecayWithDetails(ctx context.Context, agentID uuid.U
 			continue
 		}
 
-		decayResult := s.ApplyDecay(ctx, mem, memories)
+		decayResult := s.applyDecayEff(ctx, mem, memories, eff)
 		result.Details = append(result.Details, *decayResult)
 
 		confidenceDelta := math.Abs(float64(decayResult.NewConfidence - decayResult.OldConfidence))

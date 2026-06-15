@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/Harshitk-cp/engram/internal/domain"
 	"github.com/Harshitk-cp/engram/internal/store"
@@ -32,7 +33,7 @@ func NewAdminService(ms domain.MemoryStore, ec domain.EmbeddingClient, uow *stor
 
 // adminMutation builds an audit row for an operator action. ContentHash is the
 // hash of the memory's content at the time of the action.
-func adminMutation(mem *domain.Memory, mtype domain.MutationType, reason string, actorID uuid.UUID) *domain.MutationLog {
+func adminMutation(mem *domain.Memory, mtype domain.MutationType, reason, actorType string, actorID uuid.UUID) *domain.MutationLog {
 	tid := mem.TenantID
 	aid := actorID
 	return &domain.MutationLog{
@@ -45,7 +46,7 @@ func adminMutation(mem *domain.Memory, mtype domain.MutationType, reason string,
 		AnchorID:     mem.AnchorID,
 		Binding:      string(mem.Binding),
 		ContentHash:  domain.HashContent(mem.Content),
-		ActorType:    "api_key",
+		ActorType:    actorType,
 		ActorID:      &aid,
 	}
 }
@@ -58,7 +59,7 @@ func mapMemoryErr(err error) error {
 }
 
 // UpdateConfidence overrides a memory's confidence, recording the before/after.
-func (s *AdminService) UpdateConfidence(ctx context.Context, memID, tenantID uuid.UUID, newConfidence float32, reason string, actorID uuid.UUID) (*domain.Memory, error) {
+func (s *AdminService) UpdateConfidence(ctx context.Context, memID, tenantID uuid.UUID, newConfidence float32, reason, actorType string, actorID uuid.UUID) (*domain.Memory, error) {
 	if reason == "" {
 		return nil, ErrReasonRequired
 	}
@@ -68,7 +69,7 @@ func (s *AdminService) UpdateConfidence(ctx context.Context, memID, tenantID uui
 	}
 
 	old := mem.Confidence
-	mut := adminMutation(mem, domain.MutationAdminOverride, reason, actorID)
+	mut := adminMutation(mem, domain.MutationAdminOverride, reason, actorType, actorID)
 	mut.OldConfidence = &old
 	mut.NewConfidence = &newConfidence
 
@@ -86,7 +87,7 @@ func (s *AdminService) UpdateConfidence(ctx context.Context, memID, tenantID uui
 
 // UpdateContent corrects a memory's content, re-embedding when possible. The
 // audit row keeps the old content hash; the new hash is recorded in metadata.
-func (s *AdminService) UpdateContent(ctx context.Context, memID, tenantID uuid.UUID, content, reason string, actorID uuid.UUID) (*domain.Memory, error) {
+func (s *AdminService) UpdateContent(ctx context.Context, memID, tenantID uuid.UUID, content, reason, actorType string, actorID uuid.UUID) (*domain.Memory, error) {
 	if reason == "" {
 		return nil, ErrReasonRequired
 	}
@@ -107,7 +108,7 @@ func (s *AdminService) UpdateContent(ctx context.Context, memID, tenantID uuid.U
 		}
 	}
 
-	mut := adminMutation(mem, domain.MutationAdminOverride, reason, actorID)
+	mut := adminMutation(mem, domain.MutationAdminOverride, reason, actorType, actorID)
 	mut.Metadata = map[string]any{"new_content_hash": domain.HashContent(content)}
 
 	if err := s.uow.Do(ctx, func(st *store.TxStores) error {
@@ -125,7 +126,7 @@ func (s *AdminService) UpdateContent(ctx context.Context, memID, tenantID uuid.U
 // RedactMemory replaces a memory's content with a tombstone and clears its
 // embedding (GDPR redaction). The audit row keeps the original content hash as
 // proof of what was redacted, without retaining the original text.
-func (s *AdminService) RedactMemory(ctx context.Context, memID, tenantID uuid.UUID, reason string, actorID uuid.UUID) error {
+func (s *AdminService) RedactMemory(ctx context.Context, memID, tenantID uuid.UUID, reason, actorType string, actorID uuid.UUID) error {
 	if reason == "" {
 		return ErrReasonRequired
 	}
@@ -134,7 +135,7 @@ func (s *AdminService) RedactMemory(ctx context.Context, memID, tenantID uuid.UU
 		return mapMemoryErr(err)
 	}
 
-	mut := adminMutation(mem, domain.MutationRedaction, reason, actorID)
+	mut := adminMutation(mem, domain.MutationRedaction, reason, actorType, actorID)
 	return s.uow.Do(ctx, func(st *store.TxStores) error {
 		if err := st.Memory.RedactContent(ctx, memID, redactionTombstone); err != nil {
 			return err
@@ -149,18 +150,14 @@ func (s *AdminService) RedactMemory(ctx context.Context, memID, tenantID uuid.UU
 // the immutable audit chain. The rows and audit history remain (provable that data
 // existed and was erased) but the content is permanently unrecoverable — GDPR
 // right-to-erasure that's compatible with an append-only audit log.
-func (s *AdminService) CryptoShredAnchor(ctx context.Context, anchorID, tenantID uuid.UUID, reason string, actorID uuid.UUID) (int, error) {
+func (s *AdminService) CryptoShredAnchor(ctx context.Context, anchorID, tenantID uuid.UUID, reason, actorType string, actorID uuid.UUID) (int, error) {
 	if reason == "" {
 		return 0, ErrReasonRequired
 	}
 	count := 0
 	err := s.uow.Do(ctx, func(st *store.TxStores) error {
-		mems, err := st.Memory.ListByAnchor(ctx, anchorID, tenantID, 100000)
-		if err != nil {
-			return err
-		}
-		for i := range mems {
-			m := &mems[i]
+		// shred crypto-shreds one memory's content and audits it.
+		shred := func(m *domain.Memory) error {
 			ct, err := cryptoShred(m.Content)
 			if err != nil {
 				return err
@@ -168,19 +165,111 @@ func (s *AdminService) CryptoShredAnchor(ctx context.Context, anchorID, tenantID
 			if err := st.Memory.RedactContent(ctx, m.ID, ct); err != nil {
 				return err
 			}
-			if err := st.MutationLog.Create(ctx, adminMutation(m, domain.MutationRedaction, reason, actorID)); err != nil {
+			if err := st.MutationLog.Create(ctx, adminMutation(m, domain.MutationRedaction, reason, actorType, actorID)); err != nil {
 				return err
 			}
 			count++
+			return nil
 		}
-		return nil
+
+		// 1. Memories directly bound to the subject.
+		mems, err := st.Memory.ListByAnchor(ctx, anchorID, tenantID, 100000)
+		if err != nil {
+			return err
+		}
+		erasedIDs := make([]uuid.UUID, 0, len(mems))
+		for i := range mems {
+			if err := shred(&mems[i]); err != nil {
+				return err
+			}
+			erasedIDs = append(erasedIDs, mems[i].ID)
+		}
+
+		// 2. Beliefs transitively DERIVED from the subject's memories — these may
+		//    encode the subject's data even though they aren't anchor-bound.
+		if len(erasedIDs) > 0 {
+			derived, err := st.Memory.DerivedMemoryClosure(ctx, erasedIDs, tenantID)
+			if err != nil {
+				return err
+			}
+			for i := range derived {
+				if err := shred(&derived[i]); err != nil {
+					return err
+				}
+				erasedIDs = append(erasedIDs, derived[i].ID)
+			}
+		}
+
+		// 3. Structural traces of every erased memory: entity↔memory links,
+		//    knowledge-graph edges, spreading-activation associations.
+		if _, _, _, err := st.Memory.PurgeSubjectGraphLinks(ctx, erasedIDs); err != nil {
+			return err
+		}
+
+		// 4. The subject entity itself — its name/aliases/metadata/embedding are PII.
+		if err := st.Memory.ScrubAnchorEntity(ctx, anchorID, tenantID); err != nil {
+			return err
+		}
+
+		// 5. Record the subject-level erasure in the tamper-evident audit chain.
+		tid := tenantID
+		aid := actorID
+		return st.MutationLog.Create(ctx, &domain.MutationLog{
+			MemoryID:     anchorID, // the subject (entity) id
+			MutationType: domain.MutationRedaction,
+			SourceType:   domain.MutationSourceAdmin,
+			Reason:       "subject erasure (GDPR): " + reason,
+			TenantID:     &tid,
+			AnchorID:     &anchorID,
+			ActorType:    actorType,
+			ActorID:      &aid,
+		})
 	})
 	return count, err
 }
 
+// ErrReembedUnavailable is returned when re-embedding is requested without an
+// embedding client configured.
+var ErrReembedUnavailable = errors.New("no embedding client configured")
+
+// ReembedAgent recomputes the vector for every memory of an agent using the
+// currently configured embedding model. Use it after switching to a different
+// embedding provider/model of the SAME dimension (a different dimension needs a
+// fresh database). Returns the number of memories re-embedded.
+func (s *AdminService) ReembedAgent(ctx context.Context, agentID, tenantID uuid.UUID, expectedDim int) (int, error) {
+	if s.embeddingClient == nil {
+		return 0, ErrReembedUnavailable
+	}
+	mems, err := s.memoryStore.GetByAgentForDecay(ctx, agentID)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for i := range mems {
+		m := &mems[i]
+		if m.TenantID != tenantID || m.Content == "" {
+			continue
+		}
+		vec, err := s.embeddingClient.Embed(ctx, m.Content)
+		if err != nil {
+			return count, fmt.Errorf("re-embed memory %s: %w", m.ID, err)
+		}
+		if expectedDim > 0 && len(vec) != expectedDim {
+			return count, fmt.Errorf("re-embed produced dimension %d, expected %d — the new model's width must match the schema; a different width needs a fresh database", len(vec), expectedDim)
+		}
+		if err := s.memoryStore.UpdateContent(ctx, m.ID, m.Content, vec); err != nil {
+			return count, fmt.Errorf("update embedding for %s: %w", m.ID, err)
+		}
+		count++
+	}
+	s.logger.Info("re-embedded agent memories",
+		zap.String("agent_id", agentID.String()), zap.Int("count", count))
+	return count, nil
+}
+
 // ResolveContradiction manually settles a contradiction: the demoted belief is
 // archived, the kept belief's review flag is cleared, and the action is audited.
-func (s *AdminService) ResolveContradiction(ctx context.Context, tenantID, keepID, demoteID uuid.UUID, reason string, actorID uuid.UUID) error {
+func (s *AdminService) ResolveContradiction(ctx context.Context, tenantID, keepID, demoteID uuid.UUID, reason, actorType string, actorID uuid.UUID) error {
 	if reason == "" {
 		return ErrReasonRequired
 	}
@@ -192,7 +281,7 @@ func (s *AdminService) ResolveContradiction(ctx context.Context, tenantID, keepI
 		return mapMemoryErr(err)
 	}
 
-	mut := adminMutation(demote, domain.MutationAdminOverride, reason, actorID)
+	mut := adminMutation(demote, domain.MutationAdminOverride, reason, actorType, actorID)
 	return s.uow.Do(ctx, func(st *store.TxStores) error {
 		if err := st.Memory.Archive(ctx, demoteID); err != nil {
 			return err

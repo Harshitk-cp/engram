@@ -7,10 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/Harshitk-cp/engram/internal/api/middleware"
+	"github.com/Harshitk-cp/engram/internal/domain"
 	"github.com/Harshitk-cp/engram/internal/store"
+	"github.com/google/uuid"
 )
 
 type AuditHandler struct {
@@ -46,6 +49,42 @@ func (h *AuditHandler) Verify(w http.ResponseWriter, r *http.Request) {
 		"signed":      h.signingKey != "",
 		"verified_at": time.Now().UTC(),
 	})
+}
+
+// Chain handles GET /v1/audit/chain — returns recent hash-chain rows (with
+// seq/prev_hash/row_hash) for visualizing the audit trail in the console.
+// Optional ?agent_id= filters to one agent's records within the tenant chain;
+// ?limit= caps how many (default 100, max 500).
+func (h *AuditHandler) Chain(w http.ResponseWriter, r *http.Request) {
+	tenant := middleware.TenantFromContext(r.Context())
+	if tenant == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	var agentID *uuid.UUID
+	if s := r.URL.Query().Get("agent_id"); s != "" {
+		id, err := uuid.Parse(s)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid agent_id")
+			return
+		}
+		agentID = &id
+	}
+	limit := 100
+	if s := r.URL.Query().Get("limit"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil {
+			limit = n
+		}
+	}
+	entries, err := h.store.ChainEntries(r.Context(), tenant.ID, agentID, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load chain")
+		return
+	}
+	if entries == nil {
+		entries = []domain.MutationLog{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "count": len(entries)})
 }
 
 // Export handles GET /v1/audit/export — streams the tenant's full audit trail as

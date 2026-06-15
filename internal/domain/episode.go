@@ -10,10 +10,10 @@ import (
 type ConsolidationStatus string
 
 const (
-	ConsolidationRaw       ConsolidationStatus = "raw"
-	ConsolidationProcessed ConsolidationStatus = "processed"
+	ConsolidationRaw        ConsolidationStatus = "raw"
+	ConsolidationProcessed  ConsolidationStatus = "processed"
 	ConsolidationAbstracted ConsolidationStatus = "abstracted"
-	ConsolidationArchived  ConsolidationStatus = "archived"
+	ConsolidationArchived   ConsolidationStatus = "archived"
 )
 
 func ValidConsolidationStatus(s string) bool {
@@ -65,8 +65,8 @@ type Episode struct {
 	// Temporal context
 	OccurredAt      time.Time `json:"occurred_at"`
 	DurationSeconds *int      `json:"duration_seconds,omitempty"`
-	TimeOfDay       string    `json:"time_of_day,omitempty"`  // morning, afternoon, evening, night
-	DayOfWeek       string    `json:"day_of_week,omitempty"`  // monday, tuesday, etc.
+	TimeOfDay       string    `json:"time_of_day,omitempty"
+	DayOfWeek       string    `json:"day_of_week,omitempty"`
 
 	// Emotional markers
 	EmotionalValence   *float32 `json:"emotional_valence,omitempty"`   // -1 to 1

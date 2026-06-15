@@ -45,8 +45,9 @@ func clampConfidence(p float64) float64 {
 }
 
 type ConfidenceService struct {
-	store  domain.MemoryStore
-	logger *zap.Logger
+	store    domain.MemoryStore
+	settings domain.TenantSettingsStore // optional; nil → use service defaults
+	logger   *zap.Logger
 
 	ReinforcementLogOdds float64
 	ContradictionLogOdds float64
@@ -67,13 +68,48 @@ func NewConfidenceService(store domain.MemoryStore, logger *zap.Logger) *Confide
 	}
 }
 
+// SetSettingsStore wires per-tenant engine tuning. When set, Reinforce/Penalize
+// use the tenant's configured log-odds deltas instead of the service defaults.
+func (s *ConfidenceService) SetSettingsStore(ts domain.TenantSettingsStore) {
+	s.settings = ts
+}
+
+// reinforcementDelta resolves the per-tenant reinforcement Δ (falling back to
+// the service default if no settings store or on error).
+func (s *ConfidenceService) reinforcementDelta(ctx context.Context, tenantID uuid.UUID) float64 {
+	if s.settings == nil {
+		return s.ReinforcementLogOdds
+	}
+	if es, err := s.settings.Get(ctx, tenantID); err == nil {
+		return es.ReinforcementLogOdds
+	}
+	return s.ReinforcementLogOdds
+}
+
+func (s *ConfidenceService) contradictionDelta(ctx context.Context, tenantID uuid.UUID) float64 {
+	if s.settings == nil {
+		return s.ContradictionLogOdds
+	}
+	if es, err := s.settings.Get(ctx, tenantID); err == nil {
+		return es.ContradictionLogOdds
+	}
+	return s.ContradictionLogOdds
+}
+
 func (s *ConfidenceService) Reinforce(ctx context.Context, memoryID uuid.UUID, tenantID uuid.UUID) error {
 	memory, err := s.store.GetByID(ctx, memoryID, tenantID)
 	if err != nil {
 		return err
 	}
 
-	newConfidence := ApplyLogOddsDelta(memory.Confidence, s.ReinforcementLogOdds)
+	newConfidence := ApplyLogOddsDelta(memory.Confidence, s.reinforcementDelta(ctx, tenantID))
+	// Reinforcement is a positive signal — it must never reduce confidence. At
+	// the ceiling the clamp can produce a value just below the stored one (e.g. a
+	// legacy 1.0 memory → 0.99); keep the higher value so reinforcing never looks
+	// like a penalty.
+	if newConfidence < memory.Confidence {
+		newConfidence = memory.Confidence
+	}
 	newCount := memory.ReinforcementCount + 1
 
 	s.logger.Debug("reinforcing memory",
@@ -91,7 +127,7 @@ func (s *ConfidenceService) Penalize(ctx context.Context, memoryID uuid.UUID, te
 		return err
 	}
 
-	newConfidence := ApplyLogOddsDelta(memory.Confidence, -s.ContradictionLogOdds)
+	newConfidence := ApplyLogOddsDelta(memory.Confidence, -s.contradictionDelta(ctx, tenantID))
 	newCount := memory.ReinforcementCount - 1
 	if newCount < 0 {
 		newCount = 0

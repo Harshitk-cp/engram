@@ -48,11 +48,11 @@ export function AsyncView<T>({
   return <>{children(state.data)}</>;
 }
 
-export function Stat({ label, value, warn }: { label: string; value: React.ReactNode; warn?: boolean }) {
+export function Stat({ label, value, warn, hint }: { label: string; value: React.ReactNode; warn?: boolean; hint?: string }) {
   return (
-    <div className={`stat ${warn ? "warn" : ""}`}>
+    <div className={`stat ${warn ? "warn" : ""}`} title={hint}>
       <div className="stat-value">{value}</div>
-      <div className="stat-label">{label}</div>
+      <div className="stat-label">{label}{hint && <span className="stat-info" aria-hidden> ⓘ</span>}</div>
     </div>
   );
 }

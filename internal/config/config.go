@@ -94,13 +94,35 @@ func LLMAPIKey() string {
 }
 
 // EmbeddingAPIKey returns the API key for the configured embedding provider.
+// A generic EMBEDDING_API_KEY takes precedence (for self-hosted / non-OpenAI
+// providers); otherwise it falls back to the OpenAI key.
 func EmbeddingAPIKey() string {
 	switch EmbeddingProvider() {
 	case "mock":
 		return ""
 	default:
+		if k := os.Getenv("EMBEDDING_API_KEY"); k != "" {
+			return k
+		}
 		return OpenAIAPIKey()
 	}
+}
+
+func EmbeddingModel() string {
+	return os.Getenv("EMBEDDING_MODEL")
+}
+
+func EmbeddingBaseURL() string {
+	return os.Getenv("EMBEDDING_BASE_URL")
+}
+
+func EmbeddingDim() int {
+	if v := os.Getenv("EMBEDDING_DIM"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 1536
 }
 
 // SetupToken returns ENGRAM_SETUP_TOKEN. If empty, POST /v1/setup is disabled.
@@ -176,17 +198,21 @@ func DefaultTenantRole() string {
 	}
 }
 
-// SessionTTLHours is how long a console session lasts. Default 30 days.
+// SessionTTLHours is how long a console session lasts. Default 7 days. A shorter
+// lifetime narrows the window during which a stolen session token is usable;
+// override with SESSION_TTL_HOURS.
 func SessionTTLHours() int {
 	if n, err := strconv.Atoi(os.Getenv("SESSION_TTL_HOURS")); err == nil && n > 0 {
 		return n
 	}
-	return 720
+	return 168
 }
 
-// CookieSecure controls the Secure flag on the session cookie. Default false so
-// it works on http://localhost; set COOKIE_SECURE=true behind HTTPS.
-func CookieSecure() bool { return strings.EqualFold(os.Getenv("COOKIE_SECURE"), "true") }
+// CookieSecure controls the Secure flag on the session cookie. Defaults to true
+// (secure-by-default) so a forgotten env var in production never ships the
+// session token over cleartext HTTP. For local http://localhost development set
+// COOKIE_SECURE=false explicitly.
+func CookieSecure() bool { return !strings.EqualFold(os.Getenv("COOKIE_SECURE"), "false") }
 
 // TrustProxyHeaders controls whether client-IP headers (X-Real-IP /
 // X-Forwarded-For) are honored. Default false: on a directly-exposed server

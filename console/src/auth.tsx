@@ -10,6 +10,7 @@ interface AuthState {
   register: (email: string, password: string, name: string) => Promise<void>;
   logout: () => Promise<void>;
   switchOrg: (tenantId: string) => Promise<void>;
+  createOrg: (name: string) => Promise<void>;
 }
 
 const Ctx = createContext<AuthState>(null as unknown as AuthState);
@@ -62,9 +63,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     await Auth.switchOrg(tenantId);
     await refresh();
   };
+  const createOrg = async (name: string) => {
+    await Auth.createOrg(name);
+    await refresh();
+  };
 
   return (
-    <Ctx.Provider value={{ me, config, loading, refresh, login, register, logout, switchOrg }}>
+    <Ctx.Provider value={{ me, config, loading, refresh, login, register, logout, switchOrg, createOrg }}>
       {children}
     </Ctx.Provider>
   );

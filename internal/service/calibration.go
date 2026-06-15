@@ -50,9 +50,9 @@ func ComputeCalibration(samples []domain.CalibrationSample, agentID *uuid.UUID, 
 	}
 
 	type acc struct {
-		count    int
-		sumConf  float64
-		correct  int
+		count   int
+		sumConf float64
+		correct int
 	}
 	bins := make([]acc, nBins)
 	var brier float64

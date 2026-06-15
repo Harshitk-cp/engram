@@ -222,6 +222,34 @@ func (s *AuthService) CurrentUser(ctx context.Context, rawToken string) (*domain
 }
 
 // SwitchTenant changes the session's active org after verifying membership.
+func (s *AuthService) CreateOrg(ctx context.Context, rawToken, name string) (*domain.MembershipWithTenant, error) {
+	sess, err := s.sessions.GetByTokenHash(ctx, hashToken(rawToken))
+	if err != nil {
+		return nil, err
+	}
+	if time.Now().After(sess.ExpiresAt) {
+		return nil, errors.New("session expired")
+	}
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, errors.New("organization name is required")
+	}
+	t := &domain.Tenant{Name: name}
+	if err := s.tenants.Create(ctx, t); err != nil {
+		return nil, err
+	}
+	if err := s.memberships.Create(ctx, &domain.Membership{UserID: sess.UserID, TenantID: t.ID, Role: "owner"}); err != nil {
+		return nil, err
+	}
+	if err := s.sessions.UpdateActiveTenant(ctx, sess.ID, t.ID); err != nil {
+		return nil, err
+	}
+	return &domain.MembershipWithTenant{
+		Membership: domain.Membership{UserID: sess.UserID, TenantID: t.ID, Role: "owner"},
+		TenantName: t.Name,
+	}, nil
+}
+
 func (s *AuthService) SwitchTenant(ctx context.Context, rawToken string, tenantID uuid.UUID) error {
 	sess, err := s.sessions.GetByTokenHash(ctx, hashToken(rawToken))
 	if err != nil {

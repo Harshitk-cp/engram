@@ -26,8 +26,8 @@ type CalibrationBin struct {
 // CalibrationReport is the measured calibration of an agent's (or tenant's)
 // confidence scores: how well predicted confidence matches observed correctness.
 type CalibrationReport struct {
-	AgentID *uuid.UUID       `json:"agent_id,omitempty"`
-	Samples int              `json:"samples"`
+	AgentID *uuid.UUID `json:"agent_id,omitempty"`
+	Samples int        `json:"samples"`
 	// ECE: expected calibration error — sample-weighted mean gap between
 	// predicted confidence and observed accuracy across bins. Lower is better;
 	// 0 means perfectly calibrated.

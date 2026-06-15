@@ -21,11 +21,11 @@ func NewPolicyHandler(svc *service.PolicyService) *PolicyHandler {
 }
 
 type policyRequest struct {
-	MemoryType     string   `json:"memory_type"`
-	MaxMemories    int      `json:"max_memories"`
-	RetentionDays  *int     `json:"retention_days"`
-	PriorityWeight float64  `json:"priority_weight"`
-	AutoSummarize  bool     `json:"auto_summarize"`
+	MemoryType     string  `json:"memory_type"`
+	MaxMemories    int     `json:"max_memories"`
+	RetentionDays  *int    `json:"retention_days"`
+	PriorityWeight float64 `json:"priority_weight"`
+	AutoSummarize  bool    `json:"auto_summarize"`
 }
 
 type upsertPoliciesRequest struct {
@@ -33,11 +33,11 @@ type upsertPoliciesRequest struct {
 }
 
 type policyResponse struct {
-	MemoryType     string   `json:"memory_type"`
-	MaxMemories    int      `json:"max_memories"`
-	RetentionDays  *int     `json:"retention_days,omitempty"`
-	PriorityWeight float64  `json:"priority_weight"`
-	AutoSummarize  bool     `json:"auto_summarize"`
+	MemoryType     string  `json:"memory_type"`
+	MaxMemories    int     `json:"max_memories"`
+	RetentionDays  *int    `json:"retention_days,omitempty"`
+	PriorityWeight float64 `json:"priority_weight"`
+	AutoSummarize  bool    `json:"auto_summarize"`
 }
 
 type policiesResponse struct {

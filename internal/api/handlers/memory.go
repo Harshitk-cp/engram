@@ -36,13 +36,14 @@ type createMemoryRequest struct {
 	Provenance string         `json:"provenance,omitempty"`
 	Confidence float32        `json:"confidence,omitempty"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
-	EventDate string `json:"event_date,omitempty"`
+	EventDate  string         `json:"event_date,omitempty"`
 	// AnchorID / AnchorExternalID bind this trace to who/what it is about.
 	// Provide at most one; AnchorExternalID is resolved to (or creates) an anchor.
 	AnchorID         string `json:"anchor_id,omitempty"`
 	AnchorExternalID string `json:"anchor_external_id,omitempty"`
 	// SessionID binds this trace to a conversation (short-term, binding='session').
-	SessionID string `json:"session_id,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
+	Quarantine bool   `json:"quarantine,omitempty"`
 }
 
 type createMemoryResponse struct {
@@ -50,6 +51,8 @@ type createMemoryResponse struct {
 	Reinforced bool              `json:"reinforced"`
 	Tier       domain.MemoryTier `json:"tier"`
 	TierReason string            `json:"tier_reason"`
+	Quarantined      bool   `json:"quarantined,omitempty"`
+	QuarantineReason string `json:"quarantine_reason,omitempty"`
 }
 
 type getMemoryResponse struct {
@@ -113,6 +116,7 @@ func (h *MemoryHandler) Create(w http.ResponseWriter, r *http.Request) {
 		Source:     req.Source,
 		Confidence: req.Confidence,
 		Metadata:   req.Metadata,
+		Quarantine: req.Quarantine,
 	}
 	// Honor provenance (who originated the belief). Prefer an explicit provenance;
 	// otherwise accept a `source` that is itself a provenance value (e.g. "user").
@@ -153,6 +157,10 @@ func (h *MemoryHandler) Create(w http.ResponseWriter, r *http.Request) {
 		Reinforced: result != nil && result.Reinforced,
 		Tier:       tier,
 		TierReason: domain.TierReason(float64(memory.Confidence)),
+	}
+	if result != nil && result.Quarantined {
+		resp.Quarantined = true
+		resp.QuarantineReason = result.QuarantineReason
 	}
 
 	writeJSON(w, http.StatusCreated, resp)
@@ -270,6 +278,105 @@ func (h *MemoryHandler) Restore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ListQuarantine returns the Provenance Firewall review queue for an agent.
+func (h *MemoryHandler) ListQuarantine(w http.ResponseWriter, r *http.Request) {
+	tenant := middleware.TenantFromContext(r.Context())
+	if tenant == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	agentID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid agent id")
+		return
+	}
+
+	limit, offset := 50, 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, e := strconv.Atoi(v); e == nil {
+			limit = n
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, e := strconv.Atoi(v); e == nil {
+			offset = n
+		}
+	}
+
+	items, total, err := h.svc.ListQuarantine(r.Context(), agentID, tenant.ID, limit, offset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list quarantine")
+		return
+	}
+	if items == nil {
+		items = []domain.Memory{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "total": total, "limit": limit, "offset": offset})
+}
+
+type quarantineDecisionRequest struct {
+	Note string `json:"note,omitempty"`
+}
+
+// ReleaseQuarantine admits a quarantined trace into active memory.
+func (h *MemoryHandler) ReleaseQuarantine(w http.ResponseWriter, r *http.Request) {
+	tenant := middleware.TenantFromContext(r.Context())
+	if tenant == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid memory id")
+		return
+	}
+	var req quarantineDecisionRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	m, err := h.svc.ReleaseQuarantine(r.Context(), id, tenant.ID, req.Note)
+	if err != nil {
+		switch {
+		case errors.Is(err, service.ErrMemoryNotFound):
+			writeError(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, service.ErrNotQuarantined):
+			writeError(w, http.StatusConflict, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to release memory")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"memory": m, "released": true})
+}
+
+// RejectQuarantine permanently discards a quarantined trace.
+func (h *MemoryHandler) RejectQuarantine(w http.ResponseWriter, r *http.Request) {
+	tenant := middleware.TenantFromContext(r.Context())
+	if tenant == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid memory id")
+		return
+	}
+	var req quarantineDecisionRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	if err := h.svc.RejectQuarantine(r.Context(), id, tenant.ID, req.Note); err != nil {
+		switch {
+		case errors.Is(err, service.ErrMemoryNotFound):
+			writeError(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, service.ErrNotQuarantined):
+			writeError(w, http.StatusConflict, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to reject memory")
+		}
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -50,11 +50,11 @@ func TestFeedbackEffects(t *testing.T) {
 			expectedReview:     true,
 		},
 		{
-			name:              "outdated triggers summarize",
-			feedbackType:      domain.FeedbackTypeOutdated,
-			expectedLogOdds:   -0.8,
+			name:               "outdated triggers summarize",
+			feedbackType:       domain.FeedbackTypeOutdated,
+			expectedLogOdds:    -0.8,
 			expectedReinfDelta: -1,
-			expectedSummarize: true,
+			expectedSummarize:  true,
 		},
 	}
 
@@ -190,13 +190,13 @@ func TestComputeLearningStats_ExcludesNonLearningMutations(t *testing.T) {
 		}
 	}
 	mutationStore := &mockMutationLogStore{logs: []domain.MutationLog{
-		mut(domain.MutationFeedback, 0.5, 0.7),      // +1 increase (counts)
-		mut(domain.MutationOutcome, 0.7, 0.6),       // +1 decrease (counts)
-		mut(domain.MutationDecay, 0.6, 0.5),         // excluded
-		mut(domain.MutationDeletion, 0.5, 0.0),      // excluded
-		mut(domain.MutationArchive, 0.5, 0.5),       // excluded
+		mut(domain.MutationFeedback, 0.5, 0.7),       // +1 increase (counts)
+		mut(domain.MutationOutcome, 0.7, 0.6),        // +1 decrease (counts)
+		mut(domain.MutationDecay, 0.6, 0.5),          // excluded
+		mut(domain.MutationDeletion, 0.5, 0.0),       // excluded
+		mut(domain.MutationArchive, 0.5, 0.5),        // excluded
 		mut(domain.MutationAdminOverride, 0.5, 0.95), // excluded
-		mut(domain.MutationRedaction, 0.95, 0.0),    // excluded
+		mut(domain.MutationRedaction, 0.95, 0.0),     // excluded
 	}}
 	statsStore := &mockLearningStatsStore{}
 
@@ -213,6 +213,76 @@ func TestComputeLearningStats_ExcludesNonLearningMutations(t *testing.T) {
 	}
 	if stats.ConfidenceDecreases != 1 {
 		t.Errorf("ConfidenceDecreases = %d, want 1 (only outcome)", stats.ConfidenceDecreases)
+	}
+}
+
+// TestComputeLearningStats_VelocityAndStability verifies the two derived
+// dashboard metrics: velocity (net confidence direction, [-1,1]) and stability
+// (share of touched beliefs that held up vs. were overturned, [0,1]).
+func TestComputeLearningStats_VelocityAndStability(t *testing.T) {
+	agentID := uuid.New()
+	memID := uuid.New()
+	now := time.Now()
+
+	mut := func(mt domain.MutationType, reason string, old, newC float32) domain.MutationLog {
+		o, n := old, newC
+		return domain.MutationLog{
+			MemoryID: memID, AgentID: agentID, MutationType: mt, Reason: reason,
+			OldConfidence: &o, NewConfidence: &n, CreatedAt: now,
+		}
+	}
+	mutationStore := &mockMutationLogStore{logs: []domain.MutationLog{
+		mut(domain.MutationFeedback, "feedback: helpful", 0.5, 0.7),      // inc, helpful
+		mut(domain.MutationFeedback, "feedback: helpful", 0.6, 0.8),      // inc, helpful
+		mut(domain.MutationFeedback, "feedback: contradicted", 0.8, 0.5), // dec, contradicted
+		mut(domain.MutationReinforcement, "reinforce", 0.7, 0.8),         // inc, reinforced
+	}}
+	statsStore := &mockLearningStatsStore{}
+
+	svc := NewLearningService(newMockMemoryStore(), nil, testLogger())
+	svc.SetMutationLogStore(mutationStore)
+	svc.SetLearningStatsStore(statsStore)
+
+	stats, err := svc.ComputeLearningStats(context.Background(), agentID, now.Add(-time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ComputeLearningStats: %v", err)
+	}
+
+	if stats.LearningVelocity == nil {
+		t.Fatal("LearningVelocity is nil, want a value")
+	}
+	if got := *stats.LearningVelocity; got < 0.49 || got > 0.51 {
+		t.Errorf("LearningVelocity = %f, want ~0.50 ((3-1)/4)", got)
+	}
+
+	if stats.StabilityScore == nil {
+		t.Fatal("StabilityScore is nil, want a value")
+	}
+	if got := *stats.StabilityScore; got < 0.74 || got > 0.76 {
+		t.Errorf("StabilityScore = %f, want ~0.75 (reinforced 3 / touched 4)", got)
+	}
+}
+
+// TestComputeLearningStats_NoSignals leaves both derived metrics nil so the
+// dashboard renders "—" rather than a misleading 0.
+func TestComputeLearningStats_NoSignals(t *testing.T) {
+	agentID := uuid.New()
+	mutationStore := &mockMutationLogStore{logs: nil}
+	statsStore := &mockLearningStatsStore{}
+
+	svc := NewLearningService(newMockMemoryStore(), nil, testLogger())
+	svc.SetMutationLogStore(mutationStore)
+	svc.SetLearningStatsStore(statsStore)
+
+	stats, err := svc.ComputeLearningStats(context.Background(), agentID, time.Now().Add(-time.Hour), time.Now())
+	if err != nil {
+		t.Fatalf("ComputeLearningStats: %v", err)
+	}
+	if stats.LearningVelocity != nil {
+		t.Errorf("LearningVelocity = %v, want nil", *stats.LearningVelocity)
+	}
+	if stats.StabilityScore != nil {
+		t.Errorf("StabilityScore = %v, want nil", *stats.StabilityScore)
 	}
 }
 

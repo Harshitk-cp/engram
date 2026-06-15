@@ -18,6 +18,8 @@ const icons = {
   audit: "M9 12l2 2 4-4 M7.835 4.697a3.42 3.42 0 0 0 1.946-.806 3.42 3.42 0 0 1 4.438 0 3.42 3.42 0 0 0 1.946.806 3.42 3.42 0 0 1 3.138 3.138 3.42 3.42 0 0 0 .806 1.946 3.42 3.42 0 0 1 0 4.438 3.42 3.42 0 0 0-.806 1.946 3.42 3.42 0 0 1-3.138 3.138 3.42 3.42 0 0 0-1.946.806 3.42 3.42 0 0 1-4.438 0 3.42 3.42 0 0 0-1.946-.806 3.42 3.42 0 0 1-3.138-3.138 3.42 3.42 0 0 0-.806-1.946 3.42 3.42 0 0 1 0-4.438 3.42 3.42 0 0 0 .806-1.946 3.42 3.42 0 0 1 3.138-3.138z",
   canon: "M4 19.5A2.5 2.5 0 0 1 6.5 17H20 M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z",
   billing: "M1 4h22v16H1z M1 10h22 M6 15h4",
+  connect: "M5 12.55a11 11 0 0 1 14.08 0 M1.42 9a16 16 0 0 1 21.16 0 M8.53 16.11a6 6 0 0 1 6.95 0 M12 20h.01",
+  subjects: "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2 M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8 M23 21v-2a4 4 0 0 0-3-3.87 M16 3.13a4 4 0 0 1 0 7.75",
 };
 
 function useClickOutside(onClose: () => void) {
@@ -33,11 +35,40 @@ function useClickOutside(onClose: () => void) {
 }
 
 function OrgSwitcher() {
-  const { me, switchOrg } = useAuth();
+  const { me, switchOrg, createOrg } = useAuth();
   const [open, setOpen] = useState(false);
-  const ref = useClickOutside(() => setOpen(false));
+  const [creating, setCreating] = useState(false);
+  const [name, setName] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+  const ref = useClickOutside(() => {
+    setOpen(false);
+    setCreating(false);
+    setErr("");
+  });
+
+  useEffect(() => {
+    if (creating) inputRef.current?.focus();
+  }, [creating]);
+
   if (!me) return null;
   const active = me.orgs.find((o) => o.tenant_id === me.active_tenant_id) || me.orgs[0];
+
+  const submitCreate = async () => {
+    const trimmed = name.trim();
+    if (!trimmed || busy) return;
+    setBusy(true);
+    setErr("");
+    try {
+      await createOrg(trimmed);
+      window.location.reload();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Failed to create organization");
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="menu-wrap" ref={ref}>
       <button className="user-btn" onClick={() => setOpen((v) => !v)}>
@@ -54,10 +85,11 @@ function OrgSwitcher() {
               key={o.tenant_id}
               className={`menu-item ${o.tenant_id === me.active_tenant_id ? "active" : ""}`}
               onClick={async () => {
-                setOpen(false);
                 if (o.tenant_id !== me.active_tenant_id) {
                   await switchOrg(o.tenant_id);
                   window.location.reload();
+                } else {
+                  setOpen(false);
                 }
               }}
             >
@@ -65,6 +97,39 @@ function OrgSwitcher() {
               <span className="conf">{o.role}</span>
             </button>
           ))}
+          <div className="menu-divider" />
+          {creating ? (
+            <div style={{ padding: "6px 8px", display: "flex", flexDirection: "column", gap: 8 }}>
+              <input
+                ref={inputRef}
+                value={name}
+                placeholder="Organization name"
+                onChange={(e) => setName(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") submitCreate();
+                  if (e.key === "Escape") { setCreating(false); setErr(""); }
+                }}
+                style={{ width: "100%" }}
+              />
+              {err && <span className="conf" style={{ color: "var(--danger, #fb7185)" }}>{err}</span>}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="btn" disabled={busy || !name.trim()} onClick={submitCreate}>
+                  {busy ? "Creating…" : "Create"}
+                </button>
+                <button
+                  className="btn-secondary"
+                  disabled={busy}
+                  onClick={() => { setCreating(false); setName(""); setErr(""); }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button className="menu-item" onClick={() => setCreating(true)}>
+              <span style={{ flex: 1 }}>+ New organization</span>
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -104,7 +169,9 @@ export function Layout({ title, children }: { title?: React.ReactNode; children:
         <div className="nav-section">Workspace</div>
         <NavLink to="/agents" className="nav-link"><Icon path={icons.agents} /> Agents</NavLink>
         <NavLink to="/canon" className="nav-link"><Icon path={icons.canon} /> Canon</NavLink>
+        <NavLink to="/subjects" className="nav-link"><Icon path={icons.subjects} /> Subjects</NavLink>
         <NavLink to="/keys" className="nav-link"><Icon path={icons.keys} /> API Keys</NavLink>
+        <NavLink to="/connect" className="nav-link"><Icon path={icons.connect} /> Connect (MCP)</NavLink>
         <NavLink to="/audit" className="nav-link"><Icon path={icons.audit} /> Audit</NavLink>
         <NavLink to="/billing" className="nav-link"><Icon path={icons.billing} /> Billing</NavLink>
         <NavLink to="/settings" className="nav-link"><Icon path={icons.settings} /> Settings</NavLink>

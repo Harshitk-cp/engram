@@ -8,24 +8,44 @@ import (
 
 // Provider constants
 const (
-	ProviderOpenAI = "openai"
-	ProviderMock   = "mock"
+	ProviderOpenAI     = "openai"
+	ProviderCompatible = "openai-compatible" // any OpenAI-format /embeddings endpoint
+	ProviderLocal      = "local"             // alias for openai-compatible (self-hosted)
+	ProviderMock       = "mock"
 )
 
-// NewClient creates an embedding client based on the provider name.
-// Returns an error if the provider is unknown or the API key is empty (except for mock).
-func NewClient(provider, apiKey string) (domain.EmbeddingClient, error) {
-	switch provider {
-	case ProviderOpenAI:
-		if apiKey == "" {
-			return nil, fmt.Errorf("OPENAI_API_KEY is required for OpenAI embedding provider")
+const openAIBaseURL = "https://api.openai.com/v1"
+
+// Config selects and configures an embedding provider.
+type Config struct {
+	Provider   string
+	APIKey     string
+	BaseURL    string // required for openai-compatible / local
+	Model      string // optional; provider default when empty
+	Dimensions int    // optional; request a specific output width (Matryoshka models)
+}
+
+// NewClient creates an embedding client from cfg. OpenAI is routed through the
+// OpenAI-compatible client (its API is the reference format), so EMBEDDING_MODEL
+// and a requested dimension work for it too.
+func NewClient(cfg Config) (domain.EmbeddingClient, error) {
+	switch cfg.Provider {
+	case ProviderOpenAI, "":
+		if cfg.APIKey == "" {
+			return nil, fmt.Errorf("OPENAI_API_KEY (or EMBEDDING_API_KEY) is required for the OpenAI embedding provider")
 		}
-		return NewOpenAIClient(apiKey), nil
+		return NewCompatibleClient(openAIBaseURL, cfg.APIKey, cfg.Model, cfg.Dimensions), nil
+
+	case ProviderCompatible, ProviderLocal:
+		if cfg.BaseURL == "" {
+			return nil, fmt.Errorf("EMBEDDING_BASE_URL is required for the %q embedding provider", cfg.Provider)
+		}
+		return NewCompatibleClient(cfg.BaseURL, cfg.APIKey, cfg.Model, cfg.Dimensions), nil
 
 	case ProviderMock:
-		return NewMockClient(), nil
+		return NewMockClientDim(cfg.Dimensions), nil
 
 	default:
-		return nil, fmt.Errorf("unknown embedding provider: %s (valid options: openai, mock)", provider)
+		return nil, fmt.Errorf("unknown embedding provider: %s (valid: openai, openai-compatible, local, mock)", cfg.Provider)
 	}
 }

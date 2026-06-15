@@ -11,15 +11,18 @@ import (
 type MutationType string
 
 const (
-	MutationFeedback      MutationType = "feedback"
-	MutationOutcome       MutationType = "outcome"
-	MutationDecay         MutationType = "decay"
-	MutationReinforcement MutationType = "reinforcement"
-	MutationContradiction MutationType = "contradiction"
-	MutationDeletion      MutationType = "deletion"
-	MutationArchive       MutationType = "archive"
-	MutationAdminOverride MutationType = "admin_override"
-	MutationRedaction     MutationType = "redaction"
+	MutationFeedback     	  MutationType = "feedback"
+	MutationOutcome       	  MutationType = "outcome"
+	MutationDecay         	  MutationType = "decay"
+	MutationReinforcement 	  MutationType = "reinforcement"
+	MutationContradiction 	  MutationType = "contradiction"
+	MutationDeletion      	  MutationType = "deletion"
+	MutationArchive       	  MutationType = "archive"
+	MutationAdminOverride 	  MutationType = "admin_override"
+	MutationRedaction     	  MutationType = "redaction"
+	MutationQuarantine        MutationType = "quarantine"
+	MutationQuarantineRelease MutationType = "quarantine_release"
+	MutationQuarantineReject  MutationType = "quarantine_reject"
 )
 
 type MutationSourceType string
@@ -72,8 +75,8 @@ func HashContent(content string) string {
 type MemoryUsageType string
 
 const (
-	UsageRetrieved         MemoryUsageType = "retrieved"
-	UsageUsedInResponse    MemoryUsageType = "used_in_response"
+	UsageRetrieved          MemoryUsageType = "retrieved"
+	UsageUsedInResponse     MemoryUsageType = "used_in_response"
 	UsageInfluencedDecision MemoryUsageType = "influenced_decision"
 )
 
@@ -87,8 +90,8 @@ type EpisodeMemoryUsage struct {
 }
 
 type LearningStats struct {
-	ID        uuid.UUID `json:"id"`
-	AgentID   uuid.UUID `json:"agent_id"`
+	ID          uuid.UUID `json:"id"`
+	AgentID     uuid.UUID `json:"agent_id"`
 	PeriodStart time.Time `json:"period_start"`
 	PeriodEnd   time.Time `json:"period_end"`
 
@@ -127,8 +130,8 @@ type OutcomeRecord struct {
 
 // ImplicitFeedback represents feedback detected from conversation patterns.
 type ImplicitFeedback struct {
-	MemoryID    uuid.UUID    `json:"memory_id"`
-	SignalType  FeedbackType `json:"signal_type"`
-	Confidence  float32      `json:"confidence"`
-	Evidence    string       `json:"evidence"`
+	MemoryID   uuid.UUID    `json:"memory_id"`
+	SignalType FeedbackType `json:"signal_type"`
+	Confidence float32      `json:"confidence"`
+	Evidence   string       `json:"evidence"`
 }

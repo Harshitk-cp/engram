@@ -114,6 +114,48 @@ func (s *MutationLogStore) GetByMemoryID(ctx context.Context, memoryID uuid.UUID
 	return logs, rows.Err()
 }
 
+// ChainEntries returns recent audit-log rows for a tenant — including the
+// tamper-evident chain fields (seq, prev_hash, row_hash) — for visualizing the
+// hash chain in the console. Optionally filtered to one agent; note the chain
+// itself is per-tenant (seqs are global), so a filtered view shows that agent's
+// records within the larger chain (seqs may not be contiguous).
+func (s *MutationLogStore) ChainEntries(ctx context.Context, tenantID uuid.UUID, agentID *uuid.UUID, limit int) ([]domain.MutationLog, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.db.Query(ctx,
+		`SELECT id, memory_id, agent_id, mutation_type, source_type, old_confidence, new_confidence,
+		        reason, COALESCE(content_hash, ''), COALESCE(actor_type, ''), created_at,
+		        seq, COALESCE(prev_hash, ''), COALESCE(row_hash, '')
+		   FROM mutation_log
+		  WHERE tenant_id = $1
+		    AND ($2::uuid IS NULL OR agent_id = $2)
+		  ORDER BY seq DESC
+		  LIMIT $3`,
+		tenantID, agentID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var logs []domain.MutationLog
+	for rows.Next() {
+		var m domain.MutationLog
+		var memID *uuid.UUID
+		if err := rows.Scan(&m.ID, &memID, &m.AgentID, &m.MutationType, &m.SourceType,
+			&m.OldConfidence, &m.NewConfidence, &m.Reason, &m.ContentHash, &m.ActorType,
+			&m.CreatedAt, &m.Seq, &m.PrevHash, &m.RowHash); err != nil {
+			return nil, err
+		}
+		if memID != nil {
+			m.MemoryID = *memID
+		}
+		logs = append(logs, m)
+	}
+	return logs, rows.Err()
+}
+
 func (s *MutationLogStore) GetByAgentID(ctx context.Context, agentID uuid.UUID, since time.Time, limit int) ([]domain.MutationLog, error) {
 	if limit <= 0 {
 		limit = 100

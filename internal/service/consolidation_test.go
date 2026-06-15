@@ -103,6 +103,11 @@ func (m *mockMemoryStoreForConsolidation) UpdateConfidence(ctx context.Context, 
 	return nil
 }
 
+func (m *mockMemoryStoreForConsolidation) ApplyConfidenceDelta(ctx context.Context, id uuid.UUID, delta float32) error {
+	m.updated[id] = clampConf(m.updated[id] + delta)
+	return nil
+}
+
 func (m *mockMemoryStoreForConsolidation) ListDistinctAgentIDs(ctx context.Context) ([]uuid.UUID, error) {
 	return m.agentIDs, nil
 }
@@ -123,6 +128,13 @@ func (m *mockMemoryStoreForConsolidation) Archive(ctx context.Context, id uuid.U
 }
 
 func (m *mockMemoryStoreForConsolidation) Restore(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error {
+	return nil
+}
+
+func (m *mockMemoryStoreForConsolidation) ListQuarantined(ctx context.Context, agentID, tenantID uuid.UUID, limit, offset int) ([]domain.Memory, int, error) {
+	return nil, 0, nil
+}
+func (m *mockMemoryStoreForConsolidation) ReleaseQuarantine(ctx context.Context, id, tenantID uuid.UUID, newBinding domain.MemoryBinding) error {
 	return nil
 }
 
@@ -473,11 +485,11 @@ func (m *mockAssocStoreForConsolidation) Create(ctx context.Context, a *domain.M
 	return nil
 }
 
-func (m *mockAssocStoreForConsolidation) GetBySource(ctx context.Context, sourceType domain.ActivatedMemoryType, sourceID uuid.UUID) ([]domain.MemoryAssociation, error) {
+func (m *mockAssocStoreForConsolidation) GetBySource(ctx context.Context, tenantID uuid.UUID, sourceType domain.ActivatedMemoryType, sourceID uuid.UUID) ([]domain.MemoryAssociation, error) {
 	return nil, nil
 }
 
-func (m *mockAssocStoreForConsolidation) GetByTarget(ctx context.Context, targetType domain.ActivatedMemoryType, targetID uuid.UUID) ([]domain.MemoryAssociation, error) {
+func (m *mockAssocStoreForConsolidation) GetByTarget(ctx context.Context, tenantID uuid.UUID, targetType domain.ActivatedMemoryType, targetID uuid.UUID) ([]domain.MemoryAssociation, error) {
 	return nil, nil
 }
 

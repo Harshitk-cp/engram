@@ -15,12 +15,12 @@ import (
 
 // Procedural learning constants
 const (
-	ProcedureSimilarityThreshold     = 0.75 // For finding similar procedures
-	ProcedureReinforcementBoost      = 0.05 // Confidence boost on reinforcement
-	ProcedureMinSuccessRate          = 0.5  // Minimum success rate to return
-	ProcedureMinConfidenceDefault    = 0.4  // Minimum confidence for applicable procedures
-	NewProcedureInitialConfidence    = 0.5  // Initial confidence for new procedures
-	RecencyBoostDecayDays            = 30.0 // Days after which recency boost is minimal
+	ProcedureSimilarityThreshold  = 0.75 // For finding similar procedures
+	ProcedureReinforcementBoost   = 0.05 // Confidence boost on reinforcement
+	ProcedureMinSuccessRate       = 0.5  // Minimum success rate to return
+	ProcedureMinConfidenceDefault = 0.4  // Minimum confidence for applicable procedures
+	NewProcedureInitialConfidence = 0.5  // Initial confidence for new procedures
+	RecencyBoostDecayDays         = 30.0 // Days after which recency boost is minimal
 )
 
 var (

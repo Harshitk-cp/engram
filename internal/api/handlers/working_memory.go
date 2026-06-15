@@ -27,8 +27,8 @@ type activateRequest struct {
 }
 
 type activateResponse struct {
-	WorkingMemory workingMemoryResponse `json:"working_memory"`
-	AssembledContext string             `json:"assembled_context"`
+	WorkingMemory    workingMemoryResponse `json:"working_memory"`
+	AssembledContext string                `json:"assembled_context"`
 }
 
 type workingMemoryResponse struct {

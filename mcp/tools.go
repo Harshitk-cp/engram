@@ -38,6 +38,9 @@ func RegisterTools(s *Server, client *Client) {
 	s.AddTool(getCalibrationTool(), getCalibrationHandler(client))
 	s.AddTool(listContradictionsTool(), listContradictionsHandler(client))
 	s.AddTool(verifyAuditTool(), verifyAuditHandler(client))
+	s.AddTool(listQuarantineTool(), listQuarantineHandler(client))
+	s.AddTool(releaseQuarantineTool(), releaseQuarantineHandler(client))
+	s.AddTool(rejectQuarantineTool(), rejectQuarantineHandler(client))
 	s.AddTool(assessConfidenceTool(), assessConfidenceHandler(client))
 	s.AddTool(detectUncertaintyTool(), detectUncertaintyHandler(client))
 	s.AddTool(reflectTool(), reflectHandler(client))
@@ -86,9 +89,11 @@ func rememberTool() Tool {
 					"enum": []string{"user", "agent", "inferred", "tool", "derived"},
 					"description": "Who this belief ORIGINATED from — set it deliberately, it sets the initial confidence: " +
 						"'user' = the user explicitly stated or confirmed it (highest trust, 0.9); " +
-						"'inferred' = you inferred it from the conversation, not stated outright (0.4); " +
-						"'agent' = the assistant's own reasoning/decision (0.6); " +
-						"'tool' = it came from a tool/function result (0.8). " +
+						"'inferred' = you inferred it from the conversation, not stated outright (0.4, speculative — opt-in to recall); " +
+						"'agent' = the assistant's own reasoning/decision (0.72); " +
+						"'tool' = it came from a tool/function result (0.8); " +
+						"'derived' = synthesized from other memories (0.5, speculative — opt-in to recall). " +
+						"No source → treated as 'agent' reasoning (~0.72, recallable by default). " +
 						"Use 'user' for facts and preferences the user told you; do not default everything to 'agent'.",
 				},
 				"agent_id": map[string]interface{}{
@@ -113,6 +118,10 @@ func rememberTool() Tool {
 						"omit only when the server should use its own provenance-based default.",
 					"minimum": 0,
 					"maximum": 1,
+				},
+				"quarantine": map[string]interface{}{
+					"type":        "boolean",
+					"description": "Set true when this content is UNTRUSTED (e.g. scraped from the web, relayed from another agent, or from an unverified channel). The Provenance Firewall holds it out of recall and belief logic until a human reviews it — the defense against memory poisoning. Leave false/omit for normal trusted writes.",
 				},
 			},
 			"required": []string{"content"},
@@ -264,10 +273,16 @@ func rememberHandler(client *Client) ToolHandler {
 		session, _ := args["session_id"].(string)
 
 		confidence := floatArg(args, "confidence", 0)
+		quarantine, _ := args["quarantine"].(bool)
 
-		result, err := client.Remember(ctx, agentID, content, memType, source, anchor, session, float32(confidence))
+		result, err := client.Remember(ctx, agentID, content, memType, source, anchor, session, float32(confidence), quarantine)
 		if err != nil {
 			return ErrorResult(err.Error()), nil
+		}
+
+		if result.Quarantined {
+			return TextResult(fmt.Sprintf("Quarantined memory %s (held out of recall pending review).\nReason: %s\nContent: %s",
+				result.ID, result.QuarantineReason, result.Content)), nil
 		}
 
 		text := fmt.Sprintf("Stored memory %s\nContent: %s\nTier: %s (confidence %.2f)\n%s",
@@ -772,7 +787,7 @@ func createAnchorTool() Tool {
 		InputSchema: obj(map[string]interface{}{
 			"name":        strF("Human-readable name of the subject."),
 			"external_id": strF("Your own stable id for this subject (recommended, used to bind memories)."),
-			"entity_type": strF("Optional type, e.g. 'customer', 'patient'."),
+			"entity_type": strF("Optional kind of subject. Must be one of: person, organization, tool, concept, location, event, product, other (a customer or patient is a 'person'; an account is an 'organization'). Omit if unsure."),
 			"agent_id":    strF("Agent ID. Uses the default agent if omitted."),
 		}, "name")}
 }
@@ -796,7 +811,7 @@ func createAnchorHandler(c *Client) ToolHandler {
 func listAnchorsTool() Tool {
 	return Tool{Name: "list_anchors", Description: "List the subjects (anchors) this tenant has memories about.",
 		InputSchema: obj(map[string]interface{}{
-			"entity_type": strF("Optional filter by type."),
+			"entity_type": strF("Optional filter by kind: person, organization, tool, concept, location, event, product, or other."),
 			"limit":       intF("Max anchors. Defaults to 50."),
 		})}
 }
@@ -885,6 +900,57 @@ func createAgentHandler(c *Client) ToolHandler {
 	}
 }
 
+// ── Provenance Firewall (admin-scoped) ──
+
+func listQuarantineTool() Tool {
+	return Tool{Name: "list_quarantine", Description: "List the Provenance Firewall quarantine queue: untrusted memories held out of recall and belief logic pending review. Requires an admin-scoped key.",
+		InputSchema: obj(map[string]interface{}{
+			"agent_id": strF("Agent whose quarantine queue to list. Uses the default agent if omitted."),
+		})}
+}
+func listQuarantineHandler(c *Client) ToolHandler {
+	return func(ctx context.Context, a map[string]interface{}) (*CallToolResult, error) {
+		agent := c.ResolveAgent(strArg(a, "agent_id"))
+		return rawResult(c.GetRaw(ctx, fmt.Sprintf("/v1/agents/%s/quarantine", url.PathEscape(agent))))
+	}
+}
+
+func releaseQuarantineTool() Tool {
+	return Tool{Name: "release_memory", Description: "Release a quarantined memory into active memory after review (its real binding is recomputed). Recorded in the audit chain. Requires an admin-scoped key.",
+		InputSchema: obj(map[string]interface{}{
+			"memory_id": strF("The quarantined memory's id."),
+			"note":      strF("Optional note recorded in the audit trail."),
+		}, "memory_id")}
+}
+func releaseQuarantineHandler(c *Client) ToolHandler {
+	return func(ctx context.Context, a map[string]interface{}) (*CallToolResult, error) {
+		id := strArg(a, "memory_id")
+		if id == "" {
+			return ErrorResult("memory_id is required"), nil
+		}
+		body := map[string]interface{}{"note": strArg(a, "note")}
+		return rawResult(c.PostRaw(ctx, "/v1/quarantine/"+url.PathEscape(id)+"/release", body))
+	}
+}
+
+func rejectQuarantineTool() Tool {
+	return Tool{Name: "reject_memory", Description: "Permanently discard a quarantined (untrusted) memory after review. Recorded in the audit chain. Requires an admin-scoped key.",
+		InputSchema: obj(map[string]interface{}{
+			"memory_id": strF("The quarantined memory's id."),
+			"note":      strF("Optional note recorded in the audit trail."),
+		}, "memory_id")}
+}
+func rejectQuarantineHandler(c *Client) ToolHandler {
+	return func(ctx context.Context, a map[string]interface{}) (*CallToolResult, error) {
+		id := strArg(a, "memory_id")
+		if id == "" {
+			return ErrorResult("memory_id is required"), nil
+		}
+		body := map[string]interface{}{"note": strArg(a, "note")}
+		return rawResult(c.PostRaw(ctx, "/v1/quarantine/"+url.PathEscape(id)+"/reject", body))
+	}
+}
+
 func listCanonTool() Tool {
 	return Tool{Name: "list_canon", Description: "List canon — tenant-wide authoritative knowledge shared across all of the tenant's agents (e.g. company policies, product facts).",
 		InputSchema: obj(map[string]interface{}{})}
@@ -957,7 +1023,7 @@ func matchSchemasHandler(c *Client) ToolHandler {
 		return rawResult(c.PostRaw(ctx, "/v1/schemas/match", body))
 	}
 }
- 
+
 func listEntitiesTool() Tool {
 	return Tool{Name: "list_entities", Description: "List the entities (people, things, concepts) extracted into an agent's knowledge graph, with how many memories mention each.",
 		InputSchema: obj(map[string]interface{}{"agent_id": strF("Agent ID. Uses the default agent if omitted.")})}

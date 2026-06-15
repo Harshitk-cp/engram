@@ -16,14 +16,15 @@ import (
 type SessionHandler struct {
 	sessions *store.SessionStore
 	anchors  *store.EntityStore
+	agents   domain.AgentStore
 	ttl      time.Duration
 }
 
-func NewSessionHandler(sessions *store.SessionStore, anchors *store.EntityStore, ttl time.Duration) *SessionHandler {
+func NewSessionHandler(sessions *store.SessionStore, anchors *store.EntityStore, agents domain.AgentStore, ttl time.Duration) *SessionHandler {
 	if ttl <= 0 {
 		ttl = 30 * 24 * time.Hour // default: session memory lingers ~30 days after end
 	}
-	return &SessionHandler{sessions: sessions, anchors: anchors, ttl: ttl}
+	return &SessionHandler{sessions: sessions, anchors: anchors, agents: agents, ttl: ttl}
 }
 
 type createSessionRequest struct {
@@ -48,6 +49,9 @@ func (h *SessionHandler) Create(w http.ResponseWriter, r *http.Request) {
 	agentID, err := uuid.Parse(req.AgentID)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid or missing agent_id")
+		return
+	}
+	if !requireAgentInTenant(w, r, h.agents, agentID, tenant.ID) {
 		return
 	}
 

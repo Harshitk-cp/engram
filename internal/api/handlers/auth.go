@@ -132,6 +132,29 @@ func (h *AuthHandler) SwitchTenant(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// CreateOrg provisions a new organization for the signed-in user and switches
+// the session to it.
+func (h *AuthHandler) CreateOrg(w http.ResponseWriter, r *http.Request) {
+	c, err := r.Cookie(middleware.SessionCookieName)
+	if err != nil || c.Value == "" {
+		writeError(w, http.StatusUnauthorized, "not signed in")
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	org, err := h.svc.CreateOrg(r.Context(), c.Value, req.Name)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, org)
+}
+
 // Config tells the console which auth methods are available.
 func (h *AuthHandler) Config(w http.ResponseWriter, r *http.Request) {
 	gid, _ := config.GoogleOAuth()

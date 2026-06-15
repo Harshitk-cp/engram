@@ -214,6 +214,10 @@ func (m *mockMemoryStoreForSchema) UpdateConfidence(ctx context.Context, id uuid
 	return nil
 }
 
+func (m *mockMemoryStoreForSchema) ApplyConfidenceDelta(ctx context.Context, id uuid.UUID, delta float32) error {
+	return nil
+}
+
 func (m *mockMemoryStoreForSchema) ListDistinctAgentIDs(ctx context.Context) ([]uuid.UUID, error) {
 	return nil, nil
 }
@@ -233,6 +237,13 @@ func (m *mockMemoryStoreForSchema) Archive(ctx context.Context, id uuid.UUID) er
 }
 
 func (m *mockMemoryStoreForSchema) Restore(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error {
+	return nil
+}
+
+func (m *mockMemoryStoreForSchema) ListQuarantined(ctx context.Context, agentID, tenantID uuid.UUID, limit, offset int) ([]domain.Memory, int, error) {
+	return nil, 0, nil
+}
+func (m *mockMemoryStoreForSchema) ReleaseQuarantine(ctx context.Context, id, tenantID uuid.UUID, newBinding domain.MemoryBinding) error {
 	return nil
 }
 

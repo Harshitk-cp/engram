@@ -12,9 +12,9 @@ import (
 )
 
 type GraphHandler struct {
-	hybridSvc *service.HybridRecallService
-	graphSvc  *service.GraphBuilderService
-	graphStore domain.GraphStore
+	hybridSvc   *service.HybridRecallService
+	graphSvc    *service.GraphBuilderService
+	graphStore  domain.GraphStore
 	entityStore domain.EntityStore
 	agentStore  domain.AgentStore
 	memoryStore domain.MemoryStore
@@ -213,14 +213,14 @@ type traverseRequest struct {
 }
 
 type traverseResponse struct {
-	Paths    []pathResponse         `json:"paths"`
-	Memories []graphMemoryResponse  `json:"memories"`
+	Paths    []pathResponse        `json:"paths"`
+	Memories []graphMemoryResponse `json:"memories"`
 }
 
 type pathResponse struct {
-	Path         []uuid.UUID `json:"path"`
-	PathLength   int         `json:"path_length"`
-	TotalStrength float32    `json:"total_strength"`
+	Path          []uuid.UUID `json:"path"`
+	PathLength    int         `json:"path_length"`
+	TotalStrength float32     `json:"total_strength"`
 }
 
 type graphMemoryResponse struct {

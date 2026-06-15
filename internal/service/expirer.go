@@ -12,11 +12,11 @@ import (
 const defaultExpirerInterval = 1 * time.Hour
 
 type ExpirerService struct {
-	memoryStore domain.MemoryStore
-	policyStore domain.PolicyStore
+	memoryStore   domain.MemoryStore
+	policyStore   domain.PolicyStore
 	feedbackStore domain.FeedbackStore
-	sessionStore domain.SessionStore
-	logger      *zap.Logger
+	sessionStore  domain.SessionStore
+	logger        *zap.Logger
 
 	interval   time.Duration
 	stopCh     chan struct{}

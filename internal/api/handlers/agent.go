@@ -40,14 +40,12 @@ func (h *AgentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.ExternalID == "" {
-		writeError(w, http.StatusBadRequest, "external_id is required")
-		return
-	}
 	if req.Name == "" {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
+	// external_id is optional — the service derives a unique one from the name
+	// when the caller doesn't supply their own.
 
 	agent := &domain.Agent{
 		TenantID:   tenant.ID,

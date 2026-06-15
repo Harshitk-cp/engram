@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -32,6 +33,7 @@ type App struct {
 	Expirer       *service.ExpirerService
 	Decay         *service.DecayService
 	Consolidation *service.ConsolidationService
+	Learning      *service.LearningService
 	startTime     time.Time
 	requestCount  atomic.Int64
 	errorCount    atomic.Int64
@@ -67,7 +69,6 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	llmProvider := config.LLMProvider()
 	llmAPIKey := config.LLMAPIKey()
 	embeddingProvider := config.EmbeddingProvider()
-	embeddingAPIKey := config.EmbeddingAPIKey()
 
 	var err error
 	llmClient, err = llm.NewClient(llmProvider, llmAPIKey)
@@ -77,11 +78,32 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 		logger.Info("LLM client initialized", zap.String("provider", llmProvider))
 	}
 
-	embeddingClient, err = embedding.NewClient(embeddingProvider, embeddingAPIKey)
+	embeddingClient, err = embedding.NewClient(embedding.Config{
+		Provider:   embeddingProvider,
+		APIKey:     config.EmbeddingAPIKey(),
+		BaseURL:    config.EmbeddingBaseURL(),
+		Model:      config.EmbeddingModel(),
+		Dimensions: config.EmbeddingDim(),
+	})
 	if err != nil {
 		logger.Warn("Embedding client initialization failed", zap.String("provider", embeddingProvider), zap.Error(err))
 	} else {
-		logger.Info("Embedding client initialized", zap.String("provider", embeddingProvider))
+		logger.Info("Embedding client initialized",
+			zap.String("provider", embeddingProvider),
+			zap.String("model", config.EmbeddingModel()),
+			zap.Int("dimension", config.EmbeddingDim()))
+		if embeddingProvider != embedding.ProviderMock {
+			probeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if vec, perr := embeddingClient.Embed(probeCtx, "dimension probe"); perr != nil {
+				logger.Warn("embedding provider probe failed (continuing); recall will be empty until it works", zap.Error(perr))
+			} else if len(vec) != config.EmbeddingDim() {
+				logger.Error("embedding dimension mismatch — writes will fail until resolved",
+					zap.Int("model_output_dim", len(vec)),
+					zap.Int("configured_dim", config.EmbeddingDim()),
+					zap.String("hint", "set EMBEDDING_DIM to the model's dimension (on a fresh DB) or pick a matching model"))
+			}
+			cancel()
+		}
 	}
 
 	// Services
@@ -102,6 +124,11 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	decaySvc := service.NewDecayService(memoryStore, episodeStore, logger)
 	decaySvc.SetMutationLogStore(mutationLogStore)
 	decaySvc.SetUnitOfWork(uow)
+
+	// Per-tenant engine tuning (decay rate, floor, competition, confidence deltas).
+	tenantSettingsStore := store.NewTenantSettingsStore(db)
+	confidenceSvc.SetSettingsStore(tenantSettingsStore)
+	decaySvc.SetSettingsStore(tenantSettingsStore)
 	consolidationSvc.SetDecayService(decaySvc)
 	consolidationSvc.SetGraphStore(graphStore)
 	metacognitiveSvc := service.NewMetacognitiveService(memoryStore, episodeStore, procedureStore, schemaStore, contradictionStore, embeddingClient, logger)
@@ -111,7 +138,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	// Graph services
 	hybridRecallSvc := service.NewHybridRecallService(memoryStore, graphStore, entityStore, embeddingClient, llmClient)
 	hybridRecallSvc.SetSessionStore(sessionStore)
-	graphBuilderSvc := service.NewGraphBuilderService(memoryStore, graphStore, entityStore, embeddingClient, llmClient)
+	graphBuilderSvc := service.NewGraphBuilderService(memoryStore, graphStore, entityStore, embeddingClient, llmClient, logger)
 
 	// Learning services
 	learningSvc := service.NewLearningService(memoryStore, episodeStore, logger)
@@ -126,6 +153,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	memorySvc.SetPolicyEnforcer(policySvc)
 	memorySvc.SetContradictionStore(contradictionStore)
 	memorySvc.SetMutationLogStore(mutationLogStore)
+	memorySvc.SetSettingsStore(tenantSettingsStore) // Provenance Firewall policy
 	memorySvc.SetUnitOfWork(uow)
 	if os.Getenv("DISABLE_GRAPH") != "true" {
 		memorySvc.SetGraphBuilder(graphBuilderSvc)
@@ -162,7 +190,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	agentHandler := handlers.NewAgentHandler(agentSvc)
 	memoryHandler := handlers.NewMemoryHandler(memorySvc, hybridRecallSvc, entityStore, sessionStore)
 	anchorHandler := handlers.NewAnchorHandler(entityStore, memoryStore)
-	sessionHandler := handlers.NewSessionHandler(sessionStore, entityStore, 0)
+	sessionHandler := handlers.NewSessionHandler(sessionStore, entityStore, agentStore, 0)
 	canonHandler := handlers.NewCanonHandler(memorySvc, memoryStore)
 	policyHandler := handlers.NewPolicyHandler(policySvc)
 	feedbackHandler := handlers.NewFeedbackHandler(feedbackSvc)
@@ -175,8 +203,10 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	cognitiveHandler.SetCalibrationService(service.NewCalibrationService(mutationLogStore, logger))
 	metacognitiveHandler := handlers.NewMetacognitiveHandler(metacognitiveSvc)
 	adminHandler := handlers.NewAdminHandler(adminSvc)
+	embeddingHandler := handlers.NewEmbeddingHandler()
 	consoleHandler := handlers.NewConsoleHandler(consoleSvc)
 	auditHandler := handlers.NewAuditHandler(mutationLogStore, config.AuditSigningKey())
+	settingsHandler := handlers.NewSettingsHandler(tenantSettingsStore)
 	billingHandler := handlers.NewBillingHandler(billingStore, stripeClient, config.AppBaseURL(), logger)
 	mindHandler := handlers.NewMindHandler(memoryStore, episodeStore, procedureStore, schemaStore, agentStore)
 	tierHandler := handlers.NewTierHandler(memorySvc)
@@ -194,6 +224,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 		Expirer:       expirerSvc,
 		Decay:         decaySvc,
 		Consolidation: consolidationSvc,
+		Learning:      learningSvc,
 		startTime:     time.Now(),
 	}
 
@@ -227,11 +258,17 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	// Metrics (no auth)
 	r.Get("/metrics", app.metricsHandler())
 
+	// Sensitive unauthenticated endpoints (tenant/key minting, credential
+	// submission) get a much tighter per-IP limiter than the global default so a
+	// leaked setup token or online password guessing can't be brute-forced at
+	// 100rps. Each call returns its own isolated limiter instance.
+	strictLimit := mw.RateLimit(1, 5)
+
 	// Bootstrap (no auth — protected by X-Setup-Token header)
-	r.Post("/v1/setup", setupHandler.Bootstrap)
+	r.With(strictLimit).Post("/v1/setup", setupHandler.Bootstrap)
 
 	// Legacy tenant creation (deprecated, kept for backward compatibility)
-	r.Post("/v1/tenants", tenantHandler.Create)
+	r.With(strictLimit).Post("/v1/tenants", tenantHandler.Create)
 
 	// Stripe webhook (no session/key auth — verified by signature). Mounted
 	// outside the /v1 auth group because Stripe calls it directly.
@@ -240,11 +277,12 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	// Authenticated routes
 	// Control-plane auth routes (public; session cookie based).
 	r.Route("/auth", func(r chi.Router) {
-		r.Post("/register", authHandler.Register)
-		r.Post("/login", authHandler.Login)
+		r.With(strictLimit).Post("/register", authHandler.Register)
+		r.With(strictLimit).Post("/login", authHandler.Login)
 		r.Post("/logout", authHandler.Logout)
 		r.Get("/me", authHandler.Me)
 		r.Post("/switch-tenant", authHandler.SwitchTenant)
+		r.Post("/orgs", authHandler.CreateOrg)
 		r.Get("/config", authHandler.Config)
 		r.Get("/oauth/{provider}/start", authHandler.OAuthStart)
 		r.Get("/oauth/{provider}/callback", authHandler.OAuthCallback)
@@ -253,7 +291,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	})
 
 	r.Route("/v1", func(r chi.Router) {
-		r.Use(mw.SessionOrAPIKey(apiKeyStore, authSvc))
+		r.Use(mw.SessionOrAPIKey(apiKeyStore, authSvc, config.CORSAllowedOrigins()))
 		r.Use(mw.RequireWriteForMutations)
 
 		// Key management (admin scope required)
@@ -288,6 +326,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 				r.Get("/learning/stats", learningHandler.GetStats)
 				r.Get("/dashboard", consoleHandler.Dashboard)
 				r.Get("/review-queue", consoleHandler.ReviewQueue)
+				r.With(mw.RequireScope("admin")).Get("/quarantine", memoryHandler.ListQuarantine)
 				r.Get("/memories", consoleHandler.Memories)
 				r.Get("/snapshot", consoleHandler.Snapshot)
 				r.Get("/contradictions", consoleHandler.Contradictions)
@@ -307,18 +346,30 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 			r.Get("/{id}/mutations", learningHandler.GetMutationHistory)
 		})
 
+		// Provenance Firewall: review-queue decisions (admin-scoped).
+		r.Route("/quarantine", func(r chi.Router) {
+			r.Use(mw.RequireScope("admin"))
+			r.Post("/{id}/release", memoryHandler.ReleaseQuarantine)
+			r.Post("/{id}/reject", memoryHandler.RejectQuarantine)
+		})
+
 		// Audited admin operations (operator corrections, redaction).
 		r.Route("/admin", func(r chi.Router) {
 			r.Use(mw.RequireScope("admin"))
 			r.Post("/memories/{id}/redact", adminHandler.Redact)
 			r.Post("/contradictions/resolve", adminHandler.ResolveContradiction)
 			r.Post("/anchors/{id}/shred", adminHandler.CryptoShredAnchor)
+			r.Post("/agents/{id}/reembed", adminHandler.Reembed)
 		})
+
+		// Active embedding configuration (read-only; deploy-time choice).
+		r.Get("/embedding/info", embeddingHandler.Info)
 
 		// Tamper-evident audit trail.
 		r.Route("/audit", func(r chi.Router) {
 			r.Use(mw.RequireScope("admin"))
 			r.Get("/verify", auditHandler.Verify)
+			r.Get("/chain", auditHandler.Chain)
 			r.Get("/export", auditHandler.Export)
 		})
 
@@ -422,6 +473,13 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 			r.Post("/confidence/penalize", cognitiveHandler.PenalizeMemory)
 			r.Get("/calibration", cognitiveHandler.GetCalibration)
 		})
+
+		// Engine settings (per-tenant tuning). Read is open within the tenant;
+		// writes require admin scope.
+		r.Route("/settings", func(r chi.Router) {
+			r.Get("/", settingsHandler.Get)
+			r.With(mw.RequireScope("admin")).Put("/", settingsHandler.Update)
+		})
 	})
 
 	return app
@@ -510,7 +568,7 @@ var (
 	_ domain.MutationLogStore        = (*store.MutationLogStore)(nil)
 	_ domain.EpisodeMemoryUsageStore = (*store.EpisodeMemoryUsageStore)(nil)
 	_ domain.LearningStatsStore      = (*store.LearningStatsStore)(nil)
-	_ domain.EmbeddingClient         = (*embedding.OpenAIClient)(nil)
+	_ domain.EmbeddingClient         = (*embedding.CompatibleClient)(nil)
 	_ domain.EmbeddingClient         = (*embedding.MockClient)(nil)
 	_ domain.LLMClient               = (*llm.OpenAIClient)(nil)
 	_ domain.LLMClient               = (*llm.AnthropicClient)(nil)

@@ -10,10 +10,10 @@ import (
 type ActionType string
 
 const (
-	ActionTypeResponseStyle   ActionType = "response_style"
-	ActionTypeProblemSolving  ActionType = "problem_solving"
-	ActionTypeCommunication   ActionType = "communication"
-	ActionTypeWorkflow        ActionType = "workflow"
+	ActionTypeResponseStyle  ActionType = "response_style"
+	ActionTypeProblemSolving ActionType = "problem_solving"
+	ActionTypeCommunication  ActionType = "communication"
+	ActionTypeWorkflow       ActionType = "workflow"
 )
 
 // ValidActionTypes returns all valid action types.

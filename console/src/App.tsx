@@ -10,7 +10,10 @@ import Memories from "./pages/Memories";
 import Timeline from "./pages/Timeline";
 import TimeMachine from "./pages/TimeMachine";
 import Contradictions from "./pages/Contradictions";
+import Quarantine from "./pages/Quarantine";
+import Subjects from "./pages/Subjects";
 import Keys from "./pages/Keys";
+import Connect from "./pages/Connect";
 import Canon from "./pages/Canon";
 import Audit from "./pages/Audit";
 import Billing from "./pages/Billing";
@@ -43,10 +46,13 @@ export default function App() {
       <Route path="/agents/:agentId/memories" element={protect(<Memories />)} />
       <Route path="/agents/:agentId/review" element={protect(<ReviewQueue />)} />
       <Route path="/agents/:agentId/contradictions" element={protect(<Contradictions />)} />
+      <Route path="/agents/:agentId/quarantine" element={protect(<Quarantine />)} />
       <Route path="/agents/:agentId/timemachine" element={protect(<TimeMachine />)} />
       <Route path="/memories/:memoryId" element={protect(<Timeline />)} />
       <Route path="/canon" element={protect(<Canon />)} />
+      <Route path="/subjects" element={protect(<Subjects />)} />
       <Route path="/keys" element={protect(<Keys />)} />
+      <Route path="/connect" element={protect(<Connect />)} />
       <Route path="/audit" element={protect(<Audit />)} />
       <Route path="/billing" element={protect(<Billing />)} />
       <Route path="/settings" element={protect(<Settings />)} />

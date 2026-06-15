@@ -65,9 +65,9 @@ func (h *FeedbackHandler) Create(w http.ResponseWriter, r *http.Request) {
 			errors.Is(err, service.ErrFeedbackInvalidSignal):
 			writeError(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, service.ErrAgentNotFound):
-			writeError(w, http.StatusBadRequest, "agent not found")
+			writeError(w, http.StatusNotFound, "agent not found")
 		case errors.Is(err, service.ErrMemoryNotFound):
-			writeError(w, http.StatusBadRequest, "memory not found")
+			writeError(w, http.StatusNotFound, "memory not found")
 		default:
 			writeError(w, http.StatusInternalServerError, "failed to create feedback")
 		}

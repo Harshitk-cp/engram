@@ -12,14 +12,20 @@ import (
 )
 
 type mockMemoryStoreForConfidence struct {
-	memories     map[uuid.UUID]*domain.Memory
-	reinforced   map[uuid.UUID]struct{ conf float32; count int }
+	memories   map[uuid.UUID]*domain.Memory
+	reinforced map[uuid.UUID]struct {
+		conf  float32
+		count int
+	}
 }
 
 func newMockMemoryStoreForConfidence() *mockMemoryStoreForConfidence {
 	return &mockMemoryStoreForConfidence{
-		memories:   make(map[uuid.UUID]*domain.Memory),
-		reinforced: make(map[uuid.UUID]struct{ conf float32; count int }),
+		memories: make(map[uuid.UUID]*domain.Memory),
+		reinforced: make(map[uuid.UUID]struct {
+			conf  float32
+			count int
+		}),
 	}
 }
 
@@ -89,7 +95,10 @@ func (m *mockMemoryStoreForConfidence) UpdateReinforcement(ctx context.Context, 
 		mem.Confidence = confidence
 		mem.ReinforcementCount = reinforcementCount
 	}
-	m.reinforced[id] = struct{ conf float32; count int }{confidence, reinforcementCount}
+	m.reinforced[id] = struct {
+		conf  float32
+		count int
+	}{confidence, reinforcementCount}
 	return nil
 }
 
@@ -109,6 +118,14 @@ func (m *mockMemoryStoreForConfidence) UpdateConfidence(ctx context.Context, id 
 	return nil
 }
 
+func (m *mockMemoryStoreForConfidence) ApplyConfidenceDelta(ctx context.Context, id uuid.UUID, delta float32) error {
+	mem := m.memories[id]
+	if mem != nil {
+		mem.Confidence = clampConf(mem.Confidence + delta)
+	}
+	return nil
+}
+
 func (m *mockMemoryStoreForConfidence) ListDistinctAgentIDs(ctx context.Context) ([]uuid.UUID, error) {
 	return nil, nil
 }
@@ -121,6 +138,12 @@ func (m *mockMemoryStoreForConfidence) Archive(ctx context.Context, id uuid.UUID
 	return nil
 }
 
+func (m *mockMemoryStoreForConfidence) ListQuarantined(ctx context.Context, agentID, tenantID uuid.UUID, limit, offset int) ([]domain.Memory, int, error) {
+	return nil, 0, nil
+}
+func (m *mockMemoryStoreForConfidence) ReleaseQuarantine(ctx context.Context, id, tenantID uuid.UUID, newBinding domain.MemoryBinding) error {
+	return nil
+}
 func (m *mockMemoryStoreForConfidence) Restore(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error {
 	return nil
 }
@@ -227,6 +250,30 @@ func TestConfidenceService_Reinforce_CapsAtMax(t *testing.T) {
 	}
 }
 
+func TestConfidenceService_Reinforce_MonotonicAtCeiling(t *testing.T) {
+	logger := zap.NewNop()
+	tenantID := uuid.New()
+	memStore := newMockMemoryStoreForConfidence()
+
+	mem := &domain.Memory{
+		AgentID:    uuid.New(),
+		TenantID:   tenantID,
+		Confidence: 1.0,
+		Provenance: domain.ProvenanceUser,
+	}
+	_ = memStore.Create(context.Background(), mem)
+
+	svc := NewConfidenceService(memStore, logger)
+	if err := svc.Reinforce(context.Background(), mem.ID, tenantID); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := memStore.reinforced[mem.ID]
+	if updated.conf < 1.0 {
+		t.Errorf("reinforce lowered confidence from 1.0 to %f; must never decrease", updated.conf)
+	}
+}
+
 func TestConfidenceService_Penalize(t *testing.T) {
 	logger := zap.NewNop()
 	agentID := uuid.New()
@@ -295,10 +342,10 @@ func TestConfidenceService_ApplyDecay(t *testing.T) {
 	svc := NewConfidenceService(memStore, logger)
 
 	tests := []struct {
-		name           string
-		hoursAgo       float64
-		initialConf    float32
-		wantDecayed    bool
+		name        string
+		hoursAgo    float64
+		initialConf float32
+		wantDecayed bool
 	}{
 		{
 			name:        "recent memory no decay",
@@ -369,7 +416,7 @@ func TestProvenance_InitialConfidence(t *testing.T) {
 	}{
 		{domain.ProvenanceUser, 0.9},
 		{domain.ProvenanceTool, 0.8},
-		{domain.ProvenanceAgent, 0.6},
+		{domain.ProvenanceAgent, 0.72},
 		{domain.ProvenanceDerived, 0.5},
 		{domain.ProvenanceInferred, 0.4},
 		{domain.Provenance("unknown"), 0.5},

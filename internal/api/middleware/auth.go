@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/Harshitk-cp/engram/internal/domain"
@@ -80,12 +81,22 @@ func APIKeyAuth(apiKeyStore domain.APIKeyStore) func(http.Handler) http.Handler 
 // then falls back to a Bearer API key. Both resolve to a *domain.APIKeyAuth in
 // the request context, so all /v1 handlers work for the browser console and for
 // programmatic clients without any per-handler changes.
-func SessionOrAPIKey(apiKeyStore domain.APIKeyStore, resolver SessionResolver) func(http.Handler) http.Handler {
+func SessionOrAPIKey(apiKeyStore domain.APIKeyStore, resolver SessionResolver, allowedOrigins []string) func(http.Handler) http.Handler {
+	allowAll := len(allowedOrigins) == 1 && allowedOrigins[0] == "*"
+	allowed := make(map[string]bool, len(allowedOrigins))
+	for _, o := range allowedOrigins {
+		allowed[o] = true
+	}
+
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if resolver != nil {
 				if c, err := r.Cookie(SessionCookieName); err == nil && c.Value != "" {
 					if auth, err := resolver.ResolveSessionAuth(r.Context(), c.Value); err == nil && auth != nil {
+						if isStateChanging(r.Method) && !originAllowed(r, allowed, allowAll) {
+							writeError(w, http.StatusForbidden, "cross-origin request blocked")
+							return
+						}
 						next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey, auth)))
 						return
 					}
@@ -145,6 +156,34 @@ func RequireWriteForMutations(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func isStateChanging(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return false
+	default:
+		return true
+	}
+}
+
+func originAllowed(r *http.Request, allowed map[string]bool, allowAll bool) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		if ref := r.Header.Get("Referer"); ref != "" {
+			if u, err := url.Parse(ref); err == nil && u.Host != "" {
+				origin = u.Scheme + "://" + u.Host
+			}
+		}
+	}
+	if origin == "" {
+		return false
+	}
+	
+	if u, err := url.Parse(origin); err == nil && u.Host == r.Host {
+		return true
+	}
+	return allowAll || allowed[origin]
 }
 
 // HashAPIKey returns the SHA-256 hex digest of the given key.

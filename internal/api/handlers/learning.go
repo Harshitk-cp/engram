@@ -14,10 +14,10 @@ import (
 )
 
 type LearningHandler struct {
-	learningSvc          *service.LearningService
-	implicitFeedbackSvc  *service.ImplicitFeedbackDetector
-	mutationLogStore     domain.MutationLogStore
-	agentStore           domain.AgentStore
+	learningSvc         *service.LearningService
+	implicitFeedbackSvc *service.ImplicitFeedbackDetector
+	mutationLogStore    domain.MutationLogStore
+	agentStore          domain.AgentStore
 }
 
 func NewLearningHandler(
@@ -96,10 +96,10 @@ func (h *LearningHandler) RecordOutcome(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"status":        "recorded",
-		"episode_id":    episodeID.String(),
+		"status":         "recorded",
+		"episode_id":     episodeID.String(),
 		"memories_count": len(memoryIDs),
-		"outcome":       req.Outcome,
+		"outcome":        req.Outcome,
 	})
 }
 
