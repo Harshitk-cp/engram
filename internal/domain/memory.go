@@ -13,7 +13,7 @@ const (
 	MemoryTypeFact       MemoryType = "fact"
 	MemoryTypeDecision   MemoryType = "decision"
 	MemoryTypeConstraint MemoryType = "constraint"
-	MemoryTypeBelief MemoryType = "belief"
+	MemoryTypeBelief     MemoryType = "belief"
 )
 
 type EvidenceType string
@@ -75,7 +75,7 @@ func (p Provenance) InitialConfidence() float32 {
 	case ProvenanceTool:
 		return 0.8
 	case ProvenanceAgent:
-		return 0.6
+		return 0.72
 	case ProvenanceDerived:
 		return 0.5
 	case ProvenanceInferred:
@@ -104,6 +104,9 @@ const (
 	BindingAnchored MemoryBinding = "anchored"
 	// BindingSession: short-term, tied to one conversation.
 	BindingSession MemoryBinding = "session"
+	// BindingQuarantine: untrusted memory held OUTSIDE active recall and belief
+	// logic by the Provenance Firewall until an admin releases or rejects it.
+	BindingQuarantine MemoryBinding = "quarantine"
 )
 
 func DefaultDecayRate(b MemoryBinding) float32 {
@@ -152,10 +155,18 @@ type Memory struct {
 	AccessCount        int            `json:"access_count"`
 	CreatedAt          time.Time      `json:"created_at"`
 	UpdatedAt          time.Time      `json:"updated_at"`
-	SourceMemoryID *uuid.UUID `json:"source_memory_id,omitempty"`
-	BeliefSubject  string     `json:"belief_subject,omitempty"`
-	BeliefPredicate string    `json:"belief_predicate,omitempty"`
-	BeliefObject   string     `json:"belief_object,omitempty"`
+	SourceMemoryID     *uuid.UUID     `json:"source_memory_id,omitempty"`
+	BeliefSubject      string         `json:"belief_subject,omitempty"`
+	BeliefPredicate    string         `json:"belief_predicate,omitempty"`
+	BeliefObject       string         `json:"belief_object,omitempty"`
+
+	// Quarantine is an input-only hint: when true the caller is declaring this
+	// write untrusted, so the Provenance Firewall holds it for review regardless
+	// of tenant policy. Not a stored column.
+	Quarantine bool `json:"quarantine,omitempty"`
+	// QuarantineReason / QuarantinedAt are set when the firewall holds a trace.
+	QuarantineReason string     `json:"quarantine_reason,omitempty"`
+	QuarantinedAt    *time.Time `json:"quarantined_at,omitempty"`
 }
 
 type ConversationIngestRequest struct {
@@ -164,9 +175,9 @@ type ConversationIngestRequest struct {
 	Messages  []Message      `json:"messages"`
 	EventDate *time.Time     `json:"event_date,omitempty"`
 	Metadata  map[string]any `json:"metadata,omitempty"`
-	Sync 	  bool 		     `json:"sync"`
-	AnchorID  *uuid.UUID `json:"-"`
-	SessionID *uuid.UUID `json:"-"`
+	Sync      bool           `json:"sync"`
+	AnchorID  *uuid.UUID     `json:"-"`
+	SessionID *uuid.UUID     `json:"-"`
 }
 
 type IngestResult struct {
@@ -180,5 +191,5 @@ type ExtractedConversationMemory struct {
 	Content      string       `json:"content"`
 	Confidence   float32      `json:"confidence,omitempty"`
 	EvidenceType EvidenceType `json:"evidence_type,omitempty"`
-	Source string `json:"source"`
+	Source       string       `json:"source"`
 }

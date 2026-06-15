@@ -25,10 +25,10 @@ func NewConversationHandler(svc *service.ConversationService, anchors *store.Ent
 }
 
 type ingestRequest struct {
-	Messages []domain.Message `json:"messages"`
-	EventDate string `json:"event_date,omitempty"`
-	Metadata map[string]any `json:"metadata,omitempty"`
-	Sync bool `json:"sync"`
+	Messages  []domain.Message `json:"messages"`
+	EventDate string           `json:"event_date,omitempty"`
+	Metadata  map[string]any   `json:"metadata,omitempty"`
+	Sync      bool             `json:"sync"`
 	// Bind extracted traces to a subject and/or a conversation.
 	AnchorID         string `json:"anchor_id,omitempty"`
 	AnchorExternalID string `json:"anchor_external_id,omitempty"`
@@ -36,9 +36,9 @@ type ingestRequest struct {
 }
 
 type ingestResponse struct {
-	Stored     int    `json:"stored"`
-	Skipped    int    `json:"skipped"`
-	DurationMs int64  `json:"duration_ms"`
+	Stored     int   `json:"stored"`
+	Skipped    int   `json:"skipped"`
+	DurationMs int64 `json:"duration_ms"`
 }
 
 // Ingest handles POST /v1/agents/{id}/conversations/ingest.

@@ -12,15 +12,16 @@ import (
 const defaultExpirerInterval = 1 * time.Hour
 
 type ExpirerService struct {
-	memoryStore domain.MemoryStore
-	policyStore domain.PolicyStore
+	memoryStore   domain.MemoryStore
+	policyStore   domain.PolicyStore
 	feedbackStore domain.FeedbackStore
-	sessionStore domain.SessionStore
-	logger      *zap.Logger
+	sessionStore  domain.SessionStore
+	logger        *zap.Logger
 
-	interval time.Duration
-	stopCh   chan struct{}
-	wg       sync.WaitGroup
+	interval   time.Duration
+	stopCh     chan struct{}
+	cancelRuns context.CancelFunc
+	wg         sync.WaitGroup
 }
 
 // SetSessionStore enables the session-memory expiry sweep (optional).
@@ -45,6 +46,8 @@ func (s *ExpirerService) SetInterval(d time.Duration) {
 
 // Start runs the expirer on a periodic schedule in a background goroutine.
 func (s *ExpirerService) Start() {
+	baseCtx, cancel := context.WithCancel(context.Background())
+	s.cancelRuns = cancel
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -56,9 +59,9 @@ func (s *ExpirerService) Start() {
 		for {
 			select {
 			case <-ticker.C:
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				s.run(ctx)
-				cancel()
+				ctx, tickCancel := context.WithTimeout(baseCtx, 30*time.Second)
+				guardPanic(s.logger, "expirer tick", func() { s.run(ctx) })
+				tickCancel()
 			case <-s.stopCh:
 				s.logger.Info("memory expirer stopped")
 				return
@@ -67,8 +70,11 @@ func (s *ExpirerService) Start() {
 	}()
 }
 
-// Stop gracefully stops the expirer.
+// Stop gracefully stops the expirer, cancelling any in-flight sweep.
 func (s *ExpirerService) Stop() {
+	if s.cancelRuns != nil {
+		s.cancelRuns()
+	}
 	close(s.stopCh)
 	s.wg.Wait()
 }

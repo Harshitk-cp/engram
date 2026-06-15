@@ -67,6 +67,7 @@ var (
 	ErrMemoryAgentIDMissing = errors.New("agent_id is required")
 	ErrRecallQueryEmpty     = errors.New("query is required")
 	ErrRecallAgentIDMissing = errors.New("agent_id is required for recall")
+	ErrNotQuarantined       = errors.New("memory is not quarantined")
 )
 
 type PolicyEnforcer interface {
@@ -80,7 +81,7 @@ const (
 	ContradictionCandidateThreshold = 0.25
 	// typeAwareCandidateLimit is the maximum number of same-type memories retrieved as
 	typeAwareCandidateLimit = 15
-	ReinforcementThreshold = 0.85
+	ReinforcementThreshold  = 0.85
 	// ReinforcementConfidenceBoost is added to confidence when a belief is reinforced.
 	ReinforcementConfidenceBoost = 0.05
 	// MaxConfidence is the maximum confidence value.
@@ -91,25 +92,33 @@ const (
 	MinConfidence = 0.1
 	// NewContradictingBeliefConfidence is the starting confidence for a contradicting belief.
 	NewContradictingBeliefConfidence = 0.7
-	// DefaultRecallMinConfidence is the default minimum confidence for recall.
-	DefaultRecallMinConfidence = 0.6
+	// DefaultRecallMinConfidence is the default minimum confidence for recall. It
+	// is aligned with the Warm-tier floor (>0.70) so the confidence gate and the
+	// default tier window ({Hot, Warm}) agree instead of silently contradicting
+	// each other — a memory that passes the floor is in a recalled tier and vice
+	// versa. Speculative beliefs (inferred/derived, <0.70) are opt-in via a lower
+	// MinConfidence or explicit IncludeTiers.
+	DefaultRecallMinConfidence = 0.70
 	// UsageReinforcementBoost is the small boost applied when a memory is recalled.
 	UsageReinforcementBoost = 0.02
 	// SessionPromotionThreshold is the reinforcement count at which a recurring
 	SessionPromotionThreshold = 3
 )
 
-func sameAnchorCandidates(candidates []domain.MemoryWithScore, anchorID *uuid.UUID) []domain.MemoryWithScore {
-	out := candidates[:0]
+func sameScopeCandidates(candidates []domain.MemoryWithScore, m *domain.Memory) []domain.MemoryWithScore {
+	out := make([]domain.MemoryWithScore, 0, len(candidates))
 	for _, c := range candidates {
-		if sameAnchor(c.AnchorID, anchorID) {
+		if sameUUIDPtr(c.AnchorID, m.AnchorID) && sameUUIDPtr(c.SessionID, m.SessionID) {
 			out = append(out, c)
 		}
 	}
 	return out
 }
 
-func sameAnchor(a, b *uuid.UUID) bool {
+// sameUUIDPtr treats two NULLs as equal but a NULL never equal to a value, so
+// two distinct anonymous sessions (both anchor NULL, different session IDs)
+// are different scopes and never reinforce or supersede each other.
+func sameUUIDPtr(a, b *uuid.UUID) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
@@ -132,6 +141,9 @@ type MemoryService struct {
 	llmClient             domain.LLMClient
 	contradictionDetector contradiction.Detector
 	contradictionStore    domain.ContradictionStore
+	mutationLogStore      domain.MutationLogStore
+	settingsStore         domain.TenantSettingsStore // optional; nil → firewall off
+	uow                   *store.UnitOfWork
 	policyEnforcer        PolicyEnforcer
 	graphBuilder          GraphBuilder
 	logger                *zap.Logger
@@ -139,11 +151,18 @@ type MemoryService struct {
 }
 
 func NewMemoryService(ms domain.MemoryStore, as domain.AgentStore, ec domain.EmbeddingClient, lc domain.LLMClient, logger *zap.Logger) *MemoryService {
+	// Detector selection (CONTRADICTION_MODE: hybrid|llm|embedding).
+	// Default is hybrid when an LLM is available: embedding-first with LLM
+	// escalation only on ambiguous cases — near-LLM accuracy at ~30% of the
+	// LLM calls. Without an LLM we fall back to the pure embedding detector.
 	var detector contradiction.Detector
-	if lc != nil && os.Getenv("CONTRADICTION_MODE") != "embedding" {
-		detector = contradiction.NewLLMDetector(lc)
-	} else {
+	switch {
+	case lc == nil || os.Getenv("CONTRADICTION_MODE") == "embedding":
 		detector = contradiction.NewEmbeddingDetector()
+	case os.Getenv("CONTRADICTION_MODE") == "llm":
+		detector = contradiction.NewLLMDetector(lc)
+	default:
+		detector = contradiction.NewHybridDetector(lc)
 	}
 
 	svc := &MemoryService{
@@ -173,6 +192,68 @@ func (s *MemoryService) SetContradictionStore(cs domain.ContradictionStore) {
 	s.contradictionStore = cs
 }
 
+func (s *MemoryService) SetMutationLogStore(mls domain.MutationLogStore) {
+	s.mutationLogStore = mls
+}
+
+// SetSettingsStore wires per-tenant settings so the Provenance Firewall can
+// consult the tenant's quarantine policy. When nil, only an explicit per-write
+// quarantine flag takes effect.
+func (s *MemoryService) SetSettingsStore(ts domain.TenantSettingsStore) {
+	s.settingsStore = ts
+}
+
+func (s *MemoryService) SetUnitOfWork(uow *store.UnitOfWork) {
+	s.uow = uow
+}
+
+// buildContradictionMutation builds an audit row for a belief change caused by a
+// contradicting belief; source_id points at the contradicting belief.
+func buildContradictionMutation(existing *domain.MemoryWithScore, contradictedByID uuid.UUID, oldConf, newConf float32, reason string) *domain.MutationLog {
+	cbID := contradictedByID
+	tenantID := existing.TenantID
+	return &domain.MutationLog{
+		MemoryID:      existing.ID,
+		AgentID:       existing.AgentID,
+		TenantID:      &tenantID,
+		MutationType:  domain.MutationContradiction,
+		SourceType:    domain.MutationSourceSystem,
+		SourceID:      &cbID,
+		OldConfidence: &oldConf,
+		NewConfidence: &newConf,
+		Reason:        reason,
+	}
+}
+
+// tensionWriters bundles the stores a contradiction-handling branch writes to, so
+// the same branch logic runs either inside a transaction or directly.
+type tensionWriters struct {
+	mem    domain.MemoryStore
+	contra domain.ContradictionStore
+	mlog   domain.MutationLogStore
+}
+
+// applyTensionWrites runs fn atomically inside the unit of work when available,
+// falling back to the pool-backed stores (e.g. in unit tests) otherwise.
+func (s *MemoryService) applyTensionWrites(ctx context.Context, fn func(tensionWriters) error) error {
+	if s.uow != nil {
+		return s.uow.Do(ctx, func(st *store.TxStores) error {
+			return fn(tensionWriters{mem: st.Memory, contra: st.Contradiction, mlog: st.MutationLog})
+		})
+	}
+	return fn(tensionWriters{mem: s.memoryStore, contra: s.contradictionStore, mlog: s.mutationLogStore})
+}
+
+// enforceCreatePolicy runs policy enforcement for a newly created belief. It is
+// best-effort and intentionally runs outside any transaction.
+func (s *MemoryService) enforceCreatePolicy(ctx context.Context, m *domain.Memory) {
+	if s.policyEnforcer != nil {
+		if err := s.policyEnforcer.EnforceOnCreate(ctx, m); err != nil {
+			s.logger.Warn("policy enforcement failed after memory creation", zap.Error(err))
+		}
+	}
+}
+
 func (s *MemoryService) SetPolicyEnforcer(pe PolicyEnforcer) {
 	s.policyEnforcer = pe
 }
@@ -185,6 +266,10 @@ func (s *MemoryService) SetGraphBuilder(gb GraphBuilder) {
 type CreateResult struct {
 	Reinforced         bool      `json:"reinforced"`
 	ReinforcedMemoryID uuid.UUID `json:"reinforced_memory_id,omitempty"`
+	// Quarantined is true when the Provenance Firewall held this write out of
+	// active memory; QuarantineReason explains why.
+	Quarantined      bool   `json:"quarantined,omitempty"`
+	QuarantineReason string `json:"quarantine_reason,omitempty"`
 }
 
 func (s *MemoryService) Create(ctx context.Context, m *domain.Memory) (*CreateResult, error) {
@@ -236,9 +321,22 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 		}
 	}
 
-	// Default confidence
+	// Default provenance (source trust), then derive the initial confidence from
+	// it when the caller didn't supply one: user 0.9 > tool 0.8 > agent 0.6 >
+	// inferred 0.4. A fresh memory should enter at the trust level of its source
+	// rather than the engine ceiling — entering everything at near-certainty both
+	// contradicts the advertised provenance semantics and pollutes calibration.
+	// Any explicit value is still clamped to DefaultMaxConfidence, since the
+	// log-odds dynamics can't represent more than that (1.0 is +∞ log-odds) and
+	// storing above it would make the first reinforcement appear to lower it.
+	if m.Provenance == "" {
+		m.Provenance = domain.ProvenanceAgent
+	}
 	if m.Confidence == 0 {
-		m.Confidence = 1.0
+		m.Confidence = m.Provenance.InitialConfidence()
+	}
+	if m.Confidence > DefaultMaxConfidence {
+		m.Confidence = DefaultMaxConfidence
 	}
 
 	// Verify agent exists and belongs to tenant
@@ -258,6 +356,23 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 			// Continue without embedding — recall won't find it, but storage still works
 		} else {
 			m.Embedding = emb
+		}
+	}
+
+	// Provenance Firewall: hold untrusted writes OUT of active memory and belief
+	// logic until an admin releases or rejects them (OWASP ASI06 defense). Canon
+	// is operator-curated and trusted, so it's never quarantined. Quarantined
+	// traces keep their would-be anchor/session so release can recompute binding.
+	if m.Binding != domain.BindingCanon {
+		prov := m.Provenance // defaulted above
+		settings := domain.DefaultEngineSettings()
+		if s.settingsStore != nil {
+			if got, err := s.settingsStore.Get(ctx, m.TenantID); err == nil {
+				settings = got
+			}
+		}
+		if quarantine, reason := settings.ShouldQuarantine(prov, m.Quarantine); quarantine {
+			return s.quarantineWrite(ctx, m, reason)
 		}
 	}
 
@@ -297,7 +412,7 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 			}
 		}
 
-		similar = sameAnchorCandidates(similar, m.AnchorID)
+		similar = sameScopeCandidates(similar, m)
 
 		if len(similar) > 0 {
 			s.logger.Info("contradiction candidates found", zap.Int("count", len(similar)))
@@ -330,8 +445,19 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 					return result, nil
 				}
 
-				if reinforcementCandidate == nil && existing.Score >= ReinforcementThreshold {
-					reinforcementCandidate = &similar[i]
+				// Gate reinforcement on the REAL embedding similarity, not
+				// existing.Score: type-fetched candidates (GetRecentByType) carry a
+				// placeholder score of 1.0, so trusting Score here merges any two
+				// memories of the same type regardless of topic (e.g. a café
+				// preference falsely reinforcing "prefers async communication").
+				if reinforcementCandidate == nil {
+					sim := existing.Score
+					if len(m.Embedding) > 0 && len(existing.Embedding) > 0 {
+						sim = cosineSimilarity(m.Embedding, existing.Embedding)
+					}
+					if sim >= ReinforcementThreshold {
+						reinforcementCandidate = &similar[i]
+					}
 				}
 			}
 
@@ -351,7 +477,6 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 					m.UpdatedAt = reinforcementCandidate.UpdatedAt
 					result.Reinforced = true
 					result.ReinforcedMemoryID = reinforcementCandidate.ID
-
 
 					if reinforcementCandidate.Binding == domain.BindingSession &&
 						reinforcementCandidate.AnchorID != nil &&
@@ -383,7 +508,9 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 		}
 	}
 
-	// Build graph edges for hybrid retrieval (non-blocking)
+	// Build graph edges for hybrid retrieval. This runs synchronously in the
+	// create path (it calls the LLM for entity extraction), so it adds latency to
+	// writes; failures are non-fatal and logged.
 	if s.graphBuilder != nil {
 		if err := s.graphBuilder.OnMemoryCreated(ctx, m); err != nil {
 			s.logger.Warn("graph building failed after memory creation", zap.Error(err))
@@ -391,6 +518,112 @@ func (s *MemoryService) createWithOptions(ctx context.Context, m *domain.Memory,
 	}
 
 	return result, nil
+}
+
+// quarantineWrite stores an untrusted trace as quarantined (out of recall/belief
+// logic) and records the decision in the audit chain.
+func (s *MemoryService) quarantineWrite(ctx context.Context, m *domain.Memory, reason string) (*CreateResult, error) {
+	m.Binding = domain.BindingQuarantine
+	m.QuarantineReason = reason
+	now := time.Now()
+	m.QuarantinedAt = &now
+
+	if err := s.memoryStore.Create(ctx, m); err != nil {
+		return nil, err
+	}
+
+	s.logQuarantineMutation(ctx, m, domain.MutationQuarantine, "quarantine: "+reason)
+	s.logger.Info("write quarantined by firewall",
+		zap.String("memory_id", m.ID.String()),
+		zap.String("provenance", string(m.Provenance)),
+		zap.String("reason", reason))
+
+	return &CreateResult{Quarantined: true, QuarantineReason: reason}, nil
+}
+
+// ReleaseQuarantine promotes a quarantined trace into active memory by recomputing
+// its real binding from the ids it carries, and records the release in the audit
+// chain. Returns the updated memory.
+func (s *MemoryService) ReleaseQuarantine(ctx context.Context, id, tenantID uuid.UUID, note string) (*domain.Memory, error) {
+	m, err := s.memoryStore.GetByID(ctx, id, tenantID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, ErrMemoryNotFound
+		}
+		return nil, err
+	}
+	if m.Binding != domain.BindingQuarantine {
+		return nil, ErrNotQuarantined
+	}
+
+	newBinding := domain.ComputeMemoryBinding(m.AnchorID, m.SessionID)
+	if err := s.memoryStore.ReleaseQuarantine(ctx, id, tenantID, newBinding); err != nil {
+		return nil, err
+	}
+	m.Binding = newBinding
+	m.QuarantineReason = ""
+	m.QuarantinedAt = nil
+
+	reason := "release: admitted to active memory"
+	if note != "" {
+		reason = "release: " + note
+	}
+	s.logQuarantineMutation(ctx, m, domain.MutationQuarantineRelease, reason)
+	return m, nil
+}
+
+// RejectQuarantine permanently deletes a quarantined trace, recording the
+// rejection (with a content snapshot) in the audit chain first.
+func (s *MemoryService) RejectQuarantine(ctx context.Context, id, tenantID uuid.UUID, note string) error {
+	m, err := s.memoryStore.GetByID(ctx, id, tenantID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return ErrMemoryNotFound
+		}
+		return err
+	}
+	if m.Binding != domain.BindingQuarantine {
+		return ErrNotQuarantined
+	}
+
+	reason := "reject: discarded untrusted write"
+	if note != "" {
+		reason = "reject: " + note
+	}
+	s.logQuarantineMutation(ctx, m, domain.MutationQuarantineReject, reason)
+
+	return s.memoryStore.Delete(ctx, id, tenantID)
+}
+
+// ListQuarantine returns the quarantine review queue for an agent.
+func (s *MemoryService) ListQuarantine(ctx context.Context, agentID, tenantID uuid.UUID, limit, offset int) ([]domain.Memory, int, error) {
+	return s.memoryStore.ListQuarantined(ctx, agentID, tenantID, limit, offset)
+}
+
+// logQuarantineMutation writes a firewall decision to the tamper-evident audit
+// chain. Best-effort: a logging failure never blocks the operation.
+func (s *MemoryService) logQuarantineMutation(ctx context.Context, m *domain.Memory, mt domain.MutationType, reason string) {
+	if s.mutationLogStore == nil {
+		return
+	}
+	tenantID := m.TenantID
+	entry := &domain.MutationLog{
+		MemoryID:     m.ID,
+		AgentID:      m.AgentID,
+		TenantID:     &tenantID,
+		MutationType: mt,
+		SourceType:   domain.MutationSourceSystem,
+		Reason:       reason,
+		Binding:      string(m.Binding),
+		AnchorID:     m.AnchorID,
+	}
+	if mt == domain.MutationQuarantineReject {
+		snapshot := m.Content
+		entry.ContentSnapshot = &snapshot
+	}
+	if err := s.mutationLogStore.Create(ctx, entry); err != nil {
+		s.logger.Warn("failed to log firewall mutation", zap.String("memory_id", m.ID.String()), zap.Error(err))
+	}
 }
 
 func (s *MemoryService) GetByID(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) (*domain.Memory, error) {
@@ -415,8 +648,8 @@ func (s *MemoryService) Delete(ctx context.Context, id uuid.UUID, tenantID uuid.
 	return nil
 }
 
-func (s *MemoryService) Restore(ctx context.Context, id uuid.UUID) error {
-	err := s.memoryStore.Restore(ctx, id)
+func (s *MemoryService) Restore(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error {
+	err := s.memoryStore.Restore(ctx, id, tenantID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return ErrMemoryNotFound
@@ -698,46 +931,56 @@ func (s *MemoryService) handleTension(ctx context.Context, tension *domain.Tensi
 		if tension.TensionScore <= 0.25 {
 			return false, nil
 		}
-		// Demote old belief significantly, create new
+		// Demote old belief significantly, create new — atomically with the audit row.
 		newOldConfidence := existing.Confidence - ContradictionConfidencePenalty
 		if newOldConfidence < MinConfidence {
 			newOldConfidence = MinConfidence
 		}
-		if err := s.memoryStore.UpdateConfidence(ctx, existing.ID, newOldConfidence); err != nil {
-			s.logger.Warn("failed to update contradicted belief confidence", zap.Error(err))
-		}
 		m.Confidence = NewContradictingBeliefConfidence
-		if err := s.memoryStore.Create(ctx, m); err != nil {
+		if err := s.applyTensionWrites(ctx, func(w tensionWriters) error {
+			if err := w.mem.UpdateConfidence(ctx, existing.ID, newOldConfidence); err != nil {
+				return err
+			}
+			if err := w.mem.Create(ctx, m); err != nil {
+				return err
+			}
+			if w.contra != nil {
+				if err := w.contra.Create(ctx, existing.ID, m.ID); err != nil {
+					return err
+				}
+			}
+			if w.mlog != nil {
+				return w.mlog.Create(ctx, buildContradictionMutation(existing, m.ID, existing.Confidence, newOldConfidence,
+					"contradiction: hard — belief demoted, superseded by contradicting belief"))
+			}
+			return nil
+		}); err != nil {
 			return false, err
 		}
-		if s.contradictionStore != nil {
-			if err := s.contradictionStore.Create(ctx, existing.ID, m.ID); err != nil {
-				s.logger.Warn("failed to record contradiction", zap.Error(err))
-			}
-		}
-		if s.policyEnforcer != nil {
-			if err := s.policyEnforcer.EnforceOnCreate(ctx, m); err != nil {
-				s.logger.Warn("policy enforcement failed after memory creation", zap.Error(err))
-			}
-		}
+		s.enforceCreatePolicy(ctx, m)
 		return true, nil
 
 	case domain.ContradictionTemporal:
-		// Archive old belief, create new with boosted confidence (time evolution)
-		if err := s.memoryStore.Archive(ctx, existing.ID); err != nil {
-			s.logger.Warn("failed to archive temporally superseded belief", zap.Error(err))
-		}
+		// Archive old belief, create new with boosted confidence (time evolution).
 		if m.Confidence == 0 {
 			m.Confidence = NewContradictingBeliefConfidence
 		}
-		if err := s.memoryStore.Create(ctx, m); err != nil {
+		if err := s.applyTensionWrites(ctx, func(w tensionWriters) error {
+			if err := w.mem.Archive(ctx, existing.ID); err != nil {
+				return err
+			}
+			if err := w.mem.Create(ctx, m); err != nil {
+				return err
+			}
+			if w.mlog != nil {
+				return w.mlog.Create(ctx, buildContradictionMutation(existing, m.ID, existing.Confidence, existing.Confidence,
+					"contradiction: temporal — belief archived, superseded by newer belief"))
+			}
+			return nil
+		}); err != nil {
 			return false, err
 		}
-		if s.policyEnforcer != nil {
-			if err := s.policyEnforcer.EnforceOnCreate(ctx, m); err != nil {
-				s.logger.Warn("policy enforcement failed after memory creation", zap.Error(err))
-			}
-		}
+		s.enforceCreatePolicy(ctx, m)
 		return true, nil
 
 	case domain.ContradictionContextual:
@@ -745,11 +988,7 @@ func (s *MemoryService) handleTension(ctx context.Context, tension *domain.Tensi
 		if err := s.memoryStore.Create(ctx, m); err != nil {
 			return false, err
 		}
-		if s.policyEnforcer != nil {
-			if err := s.policyEnforcer.EnforceOnCreate(ctx, m); err != nil {
-				s.logger.Warn("policy enforcement failed after memory creation", zap.Error(err))
-			}
-		}
+		s.enforceCreatePolicy(ctx, m)
 		return true, nil
 
 	case domain.ContradictionSoft:
@@ -761,10 +1000,19 @@ func (s *MemoryService) handleTension(ctx context.Context, tension *domain.Tensi
 		if newOldConfidence < MinConfidence {
 			newOldConfidence = MinConfidence
 		}
-		if err := s.memoryStore.UpdateConfidence(ctx, existing.ID, newOldConfidence); err != nil {
-			s.logger.Warn("failed to reduce soft-contradicted belief confidence", zap.Error(err))
-		}
-		if err := s.memoryStore.Create(ctx, m); err != nil {
+		if err := s.applyTensionWrites(ctx, func(w tensionWriters) error {
+			if err := w.mem.UpdateConfidence(ctx, existing.ID, newOldConfidence); err != nil {
+				return err
+			}
+			if err := w.mem.Create(ctx, m); err != nil {
+				return err
+			}
+			if w.mlog != nil {
+				return w.mlog.Create(ctx, buildContradictionMutation(existing, m.ID, existing.Confidence, newOldConfidence,
+					"contradiction: soft — belief confidence reduced by competing belief"))
+			}
+			return nil
+		}); err != nil {
 			return false, err
 		}
 		return true, nil

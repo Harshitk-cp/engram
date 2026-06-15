@@ -31,6 +31,7 @@ type AgentStore interface {
 	GetByID(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) (*Agent, error)
 	GetByExternalID(ctx context.Context, externalID string, tenantID uuid.UUID) (*Agent, error)
 	ListByTenantID(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]Agent, error)
+	CountByTenant(ctx context.Context, tenantID uuid.UUID) (int, error)
 	Delete(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error
 }
 
@@ -46,7 +47,7 @@ type RecallMode string
 const (
 	RecallModeSimilarity RecallMode = "similarity"
 	RecallModeExhaustive RecallMode = "exhaustive"
-	RecallModeHybrid RecallMode = "hybrid"
+	RecallModeHybrid     RecallMode = "hybrid"
 )
 
 type RecallOpts struct {
@@ -56,20 +57,39 @@ type RecallOpts struct {
 	Scoring       ScoringMode
 	Explain       bool
 	IncludeTiers  []MemoryTier
-	RecencyBoost float32
+	RecencyBoost  float32
 	EventDateFrom *time.Time
 	EventDateTo   *time.Time
-	Mode RecallMode
+	Mode          RecallMode
 	MinSimilarity float32
-	MaxResults int
-	AnchorID *uuid.UUID
-	SessionID *uuid.UUID
-	Binding *MemoryBinding
+	MaxResults    int
+	AnchorID      *uuid.UUID
+	SessionID     *uuid.UUID
+	Binding       *MemoryBinding
 }
 
 type MemoryWithScore struct {
 	Memory
 	Score float32 `json:"score"`
+}
+
+// BeliefAtTime is a memory with its confidence reconstructed as of a past instant
+// (transaction-time reconstruction for the bitemporal "time machine").
+type BeliefAtTime struct {
+	ID         uuid.UUID `json:"id"`
+	Content    string    `json:"content"`
+	Type       string    `json:"type"`
+	Confidence float32   `json:"confidence"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// MemoryFilter holds optional filters for listing an agent's memories. Empty
+// fields are ignored. Future filters add fields here without changing signatures.
+type MemoryFilter struct {
+	Tier       string // hot | warm | cold | archive | ""
+	Type       string // a memory_type or ""
+	Provenance string // user | agent | tool | derived | inferred | ""
+	Binding    string // private | anchored | session | canon | ""
 }
 
 type MemoryStore interface {
@@ -88,11 +108,24 @@ type MemoryStore interface {
 	GetRecentByType(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, memType MemoryType, limit int) ([]MemoryWithScore, error)
 	UpdateReinforcement(ctx context.Context, id uuid.UUID, confidence float32, reinforcementCount int) error
 	UpdateConfidence(ctx context.Context, id uuid.UUID, confidence float32) error
+	// ApplyConfidenceDelta atomically adjusts confidence by delta (clamped to
+	// [0,1]) so concurrent decay (negative delta) and recall boosts compose
+	// without one clobbering the other's read-modify-write.
+	ApplyConfidenceDelta(ctx context.Context, id uuid.UUID, delta float32) error
+	// Admin correction methods
+	UpdateContent(ctx context.Context, id uuid.UUID, content string, embedding []float32) error
+	RedactContent(ctx context.Context, id uuid.UUID, tombstone string) error
+	CountNeedsReview(ctx context.Context, agentID, tenantID uuid.UUID) (int, error)
+	ListByAgentFiltered(ctx context.Context, agentID, tenantID uuid.UUID, f MemoryFilter, limit, offset int) ([]Memory, int, error)
+	BeliefsAsOf(ctx context.Context, agentID, tenantID uuid.UUID, at time.Time, limit int) ([]BeliefAtTime, int, error)
 	// Decay methods
 	ListDistinctAgentIDs(ctx context.Context) ([]uuid.UUID, error)
 	GetByAgentForDecay(ctx context.Context, agentID uuid.UUID) ([]Memory, error)
 	Archive(ctx context.Context, id uuid.UUID) error
-	Restore(ctx context.Context, id uuid.UUID) error
+	Restore(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error
+	// Provenance Firewall
+	ListQuarantined(ctx context.Context, agentID, tenantID uuid.UUID, limit, offset int) ([]Memory, int, error)
+	ReleaseQuarantine(ctx context.Context, id, tenantID uuid.UUID, newBinding MemoryBinding) error
 	GetByIDOnly(ctx context.Context, id uuid.UUID) (*Memory, error)
 	IncrementAccessAndBoost(ctx context.Context, id uuid.UUID, boost float32) error
 	// Tier methods
@@ -137,10 +170,24 @@ type TensionResult struct {
 	Explanation  string            `json:"explanation"`
 }
 
+// ContradictionPair is a detected conflict between two beliefs, with the content
+// of each side for display.
+type ContradictionPair struct {
+	BeliefID         uuid.UUID `json:"belief_id"`
+	BeliefContent    string    `json:"belief_content"`
+	BeliefConfidence float32   `json:"belief_confidence"`
+	OtherID          uuid.UUID `json:"other_id"`
+	OtherContent     string    `json:"other_content"`
+	OtherConfidence  float32   `json:"other_confidence"`
+	DetectedAt       time.Time `json:"detected_at"`
+}
+
 type ContradictionStore interface {
 	Create(ctx context.Context, beliefID, contradictedByID uuid.UUID) error
 	GetByBeliefID(ctx context.Context, beliefID uuid.UUID) ([]BeliefContradiction, error)
 	GetByContradictedByID(ctx context.Context, contradictedByID uuid.UUID) ([]BeliefContradiction, error)
+	CountByAgent(ctx context.Context, agentID, tenantID uuid.UUID) (int, error)
+	ListByAgent(ctx context.Context, agentID, tenantID uuid.UUID, limit int) ([]ContradictionPair, error)
 }
 
 type Message struct {
@@ -234,7 +281,7 @@ type EpisodeStore interface {
 	RecordAccess(ctx context.Context, id uuid.UUID) error
 
 	// Outcome
-	UpdateOutcome(ctx context.Context, id uuid.UUID, outcome OutcomeType, description string) error
+	UpdateOutcome(ctx context.Context, id uuid.UUID, tenantID uuid.UUID, outcome OutcomeType, description string) error
 
 	// Associations
 	CreateAssociation(ctx context.Context, a *EpisodeAssociation) error
@@ -320,8 +367,8 @@ type WorkingMemoryStore interface {
 // MemoryAssociationStore handles cross-memory associations for spreading activation.
 type MemoryAssociationStore interface {
 	Create(ctx context.Context, a *MemoryAssociation) error
-	GetBySource(ctx context.Context, sourceType ActivatedMemoryType, sourceID uuid.UUID) ([]MemoryAssociation, error)
-	GetByTarget(ctx context.Context, targetType ActivatedMemoryType, targetID uuid.UUID) ([]MemoryAssociation, error)
+	GetBySource(ctx context.Context, tenantID uuid.UUID, sourceType ActivatedMemoryType, sourceID uuid.UUID) ([]MemoryAssociation, error)
+	GetByTarget(ctx context.Context, tenantID uuid.UUID, targetType ActivatedMemoryType, targetID uuid.UUID) ([]MemoryAssociation, error)
 	Delete(ctx context.Context, id uuid.UUID) error
 	UpdateStrength(ctx context.Context, id uuid.UUID, strength float32) error
 }
@@ -329,8 +376,9 @@ type MemoryAssociationStore interface {
 // MutationLogStore handles logging of all memory mutations for explainability.
 type MutationLogStore interface {
 	Create(ctx context.Context, m *MutationLog) error
-	GetByMemoryID(ctx context.Context, memoryID uuid.UUID, limit int) ([]MutationLog, error)
+	GetByMemoryID(ctx context.Context, memoryID uuid.UUID, tenantID uuid.UUID, limit int) ([]MutationLog, error)
 	GetByAgentID(ctx context.Context, agentID uuid.UUID, since time.Time, limit int) ([]MutationLog, error)
+	CalibrationSamples(ctx context.Context, tenantID uuid.UUID, agentID *uuid.UUID) ([]CalibrationSample, error)
 }
 
 // EpisodeMemoryUsageStore tracks which memories were used per episode.

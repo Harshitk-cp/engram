@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -16,15 +17,15 @@ import (
 
 // Working memory constants
 const (
-	DefaultMaxSlots        = 7     // Miller's Law: 7 +/- 2
-	SpreadingDecay         = 0.5   // Activation decays 50% per hop
-	MaxSpreadingDepth      = 2     // Maximum hops for spreading activation
-	DirectActivationBoost  = 1.0   // Full activation for direct matches
-	GoalActivationBoost    = 1.2   // 20% boost for goal-relevant memories
-	SchemaActivationBoost  = 1.1   // 10% boost for schema-activated memories
-	TemporalActivationBase = 0.8   // Base activation for recent memories
-	RecencyDecay           = 0.1   // Decay per hour for recency activation
-	MinActivationLevel     = 0.1   // Minimum activation to be considered
+	DefaultMaxSlots        = 7   // Miller's Law: 7 +/- 2
+	SpreadingDecay         = 0.5 // Activation decays 50% per hop
+	MaxSpreadingDepth      = 2   // Maximum hops for spreading activation
+	DirectActivationBoost  = 1.0 // Full activation for direct matches
+	GoalActivationBoost    = 1.2 // 20% boost for goal-relevant memories
+	SchemaActivationBoost  = 1.1 // 10% boost for schema-activated memories
+	TemporalActivationBase = 0.8 // Base activation for recent memories
+	RecencyDecay           = 0.1 // Decay per hour for recency activation
+	MinActivationLevel     = 0.1 // Minimum activation to be considered
 	// MinSchemaMatchScore is defined in schema.go
 )
 
@@ -130,8 +131,8 @@ func (s *WorkingMemoryService) Activate(ctx context.Context, input domain.Activa
 	activations = s.mergeActivations(activations, recentActivations, TemporalActivationBase)
 
 	// 6. Spreading activation through associations
-	spreadActivations := s.spread(ctx, activations, MaxSpreadingDepth)
-	activations = s.mergeActivations(activations, spreadActivations, SpreadingDecay)
+	spreadActivations := s.spread(ctx, input.TenantID, activations, MaxSpreadingDepth)
+	activations = s.mergeActivations(activations, spreadActivations, 1.0)
 	s.logger.Debug("after spreading", zap.Int("count", len(activations)))
 
 	// 7. Competition for limited slots (weighted by confidence)
@@ -456,9 +457,9 @@ func (s *WorkingMemoryService) activateRecent(ctx context.Context, agentID, tena
 		episodes, err := s.episodeStore.GetByTimeRange(ctx, agentID, tenantID, cutoff, time.Now())
 		if err == nil {
 			for _, ep := range episodes {
-				// Decay based on age
+				// Exponential recency decay
 				hoursSinceOccurred := time.Since(ep.OccurredAt).Hours()
-				recencyLevel := float32(1.0 - (hoursSinceOccurred * RecencyDecay))
+				recencyLevel := float32(math.Exp(-RecencyDecay * hoursSinceOccurred))
 				if recencyLevel < MinActivationLevel {
 					continue
 				}
@@ -480,7 +481,7 @@ func (s *WorkingMemoryService) activateRecent(ctx context.Context, agentID, tena
 }
 
 // spread performs spreading activation through memory associations.
-func (s *WorkingMemoryService) spread(ctx context.Context, seeds []activatedItem, maxDepth int) []activatedItem {
+func (s *WorkingMemoryService) spread(ctx context.Context, tenantID uuid.UUID, seeds []activatedItem, maxDepth int) []activatedItem {
 	if s.assocStore == nil || maxDepth == 0 {
 		return nil
 	}
@@ -505,7 +506,7 @@ func (s *WorkingMemoryService) spread(ctx context.Context, seeds []activatedItem
 
 		for _, item := range current {
 			// Get associations from this memory
-			assocs, err := s.assocStore.GetBySource(ctx, item.Type, item.ID)
+			assocs, err := s.assocStore.GetBySource(ctx, tenantID, item.Type, item.ID)
 			if err != nil {
 				continue
 			}
@@ -524,7 +525,7 @@ func (s *WorkingMemoryService) spread(ctx context.Context, seeds []activatedItem
 				}
 
 				// Get the target memory content
-				content, confidence := s.getMemoryContent(ctx, assoc.TargetMemoryType, assoc.TargetMemoryID, item.ID)
+				content, confidence := s.getMemoryContent(ctx, assoc.TargetMemoryType, assoc.TargetMemoryID, tenantID)
 				if content == "" {
 					continue
 				}
@@ -653,13 +654,14 @@ func (s *WorkingMemoryService) saveActivations(ctx context.Context, session *dom
 	for i, item := range items {
 		pos := i + 1
 		activation := &domain.WorkingMemoryActivation{
-			SessionID:       session.ID,
-			MemoryType:      item.Type,
-			MemoryID:        item.ID,
-			ActivationLevel: item.ActivationLevel,
+			SessionID:        session.ID,
+			TenantID:         session.TenantID,
+			MemoryType:       item.Type,
+			MemoryID:         item.ID,
+			ActivationLevel:  item.ActivationLevel,
 			ActivationSource: item.Source,
-			ActivationCue:   item.Cue,
-			SlotPosition:    &pos,
+			ActivationCue:    item.Cue,
+			SlotPosition:     &pos,
 		}
 		if err := s.wmStore.CreateActivation(ctx, activation); err != nil {
 			s.logger.Debug("failed to save activation", zap.Error(err))

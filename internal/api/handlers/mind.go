@@ -16,6 +16,7 @@ type MindHandler struct {
 	episodeStore   domain.EpisodeStore
 	procedureStore domain.ProcedureStore
 	schemaStore    domain.SchemaStore
+	agentStore     domain.AgentStore
 }
 
 func NewMindHandler(
@@ -23,12 +24,14 @@ func NewMindHandler(
 	es domain.EpisodeStore,
 	ps domain.ProcedureStore,
 	ss domain.SchemaStore,
+	as domain.AgentStore,
 ) *MindHandler {
 	return &MindHandler{
 		memoryStore:    ms,
 		episodeStore:   es,
 		procedureStore: ps,
 		schemaStore:    ss,
+		agentStore:     as,
 	}
 }
 
@@ -100,6 +103,10 @@ func (h *MindHandler) GetMind(w http.ResponseWriter, r *http.Request) {
 	agentID, err := uuid.Parse(agentIDStr)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid agent_id")
+		return
+	}
+
+	if !requireAgentInTenant(w, r, h.agentStore, agentID, tenant.ID) {
 		return
 	}
 

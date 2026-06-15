@@ -180,9 +180,9 @@ func (s *WorkingMemoryStore) UpdateLastActivity(ctx context.Context, sessionID u
 func (s *WorkingMemoryStore) CreateActivation(ctx context.Context, a *domain.WorkingMemoryActivation) error {
 	return s.db.QueryRow(ctx,
 		`INSERT INTO working_memory_activations (
-			session_id, memory_type, memory_id, activation_level, activation_source,
+			session_id, tenant_id, memory_type, memory_id, activation_level, activation_source,
 			activation_cue, slot_position
-		) VALUES ($1, $2, $3, $4, $5, $6, $7)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (session_id, memory_type, memory_id) DO UPDATE SET
 			activation_level = EXCLUDED.activation_level,
 			activation_source = EXCLUDED.activation_source,
@@ -190,7 +190,7 @@ func (s *WorkingMemoryStore) CreateActivation(ctx context.Context, a *domain.Wor
 			slot_position = EXCLUDED.slot_position,
 			activated_at = NOW()
 		RETURNING id, activated_at`,
-		a.SessionID, a.MemoryType, a.MemoryID, a.ActivationLevel, a.ActivationSource,
+		a.SessionID, a.TenantID, a.MemoryType, a.MemoryID, a.ActivationLevel, a.ActivationSource,
 		a.ActivationCue, a.SlotPosition,
 	).Scan(&a.ID, &a.ActivatedAt)
 }
@@ -321,26 +321,26 @@ func NewMemoryAssociationStore(db *pgxpool.Pool) *MemoryAssociationStore {
 func (s *MemoryAssociationStore) Create(ctx context.Context, a *domain.MemoryAssociation) error {
 	return s.db.QueryRow(ctx,
 		`INSERT INTO memory_associations (
-			source_memory_type, source_memory_id, target_memory_type, target_memory_id,
+			tenant_id, source_memory_type, source_memory_id, target_memory_type, target_memory_id,
 			association_type, association_strength
-		) VALUES ($1, $2, $3, $4, $5, $6)
+		) VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (source_memory_type, source_memory_id, target_memory_type, target_memory_id, association_type)
 		DO UPDATE SET association_strength = EXCLUDED.association_strength
 		RETURNING id, created_at`,
-		a.SourceMemoryType, a.SourceMemoryID, a.TargetMemoryType, a.TargetMemoryID,
+		a.TenantID, a.SourceMemoryType, a.SourceMemoryID, a.TargetMemoryType, a.TargetMemoryID,
 		a.AssociationType, a.AssociationStrength,
 	).Scan(&a.ID, &a.CreatedAt)
 }
 
 // GetBySource retrieves all associations where the given memory is the source.
-func (s *MemoryAssociationStore) GetBySource(ctx context.Context, sourceType domain.ActivatedMemoryType, sourceID uuid.UUID) ([]domain.MemoryAssociation, error) {
+func (s *MemoryAssociationStore) GetBySource(ctx context.Context, tenantID uuid.UUID, sourceType domain.ActivatedMemoryType, sourceID uuid.UUID) ([]domain.MemoryAssociation, error) {
 	rows, err := s.db.Query(ctx,
-		`SELECT id, source_memory_type, source_memory_id, target_memory_type, target_memory_id,
+		`SELECT id, tenant_id, source_memory_type, source_memory_id, target_memory_type, target_memory_id,
 			association_type, association_strength, created_at
 		FROM memory_associations
-		WHERE source_memory_type = $1 AND source_memory_id = $2
+		WHERE tenant_id = $1 AND source_memory_type = $2 AND source_memory_id = $3
 		ORDER BY association_strength DESC`,
-		sourceType, sourceID,
+		tenantID, sourceType, sourceID,
 	)
 	if err != nil {
 		return nil, err
@@ -351,14 +351,14 @@ func (s *MemoryAssociationStore) GetBySource(ctx context.Context, sourceType dom
 }
 
 // GetByTarget retrieves all associations where the given memory is the target.
-func (s *MemoryAssociationStore) GetByTarget(ctx context.Context, targetType domain.ActivatedMemoryType, targetID uuid.UUID) ([]domain.MemoryAssociation, error) {
+func (s *MemoryAssociationStore) GetByTarget(ctx context.Context, tenantID uuid.UUID, targetType domain.ActivatedMemoryType, targetID uuid.UUID) ([]domain.MemoryAssociation, error) {
 	rows, err := s.db.Query(ctx,
-		`SELECT id, source_memory_type, source_memory_id, target_memory_type, target_memory_id,
+		`SELECT id, tenant_id, source_memory_type, source_memory_id, target_memory_type, target_memory_id,
 			association_type, association_strength, created_at
 		FROM memory_associations
-		WHERE target_memory_type = $1 AND target_memory_id = $2
+		WHERE tenant_id = $1 AND target_memory_type = $2 AND target_memory_id = $3
 		ORDER BY association_strength DESC`,
-		targetType, targetID,
+		tenantID, targetType, targetID,
 	)
 	if err != nil {
 		return nil, err
@@ -400,7 +400,7 @@ func (s *MemoryAssociationStore) scanAssociations(rows pgx.Rows) ([]domain.Memor
 	for rows.Next() {
 		var a domain.MemoryAssociation
 		err := rows.Scan(
-			&a.ID, &a.SourceMemoryType, &a.SourceMemoryID, &a.TargetMemoryType, &a.TargetMemoryID,
+			&a.ID, &a.TenantID, &a.SourceMemoryType, &a.SourceMemoryID, &a.TargetMemoryType, &a.TargetMemoryID,
 			&a.AssociationType, &a.AssociationStrength, &a.CreatedAt,
 		)
 		if err != nil {

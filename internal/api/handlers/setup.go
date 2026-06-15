@@ -49,7 +49,7 @@ func (h *SetupHandler) Bootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.Header.Get("X-Setup-Token") != h.setupToken {
+	if !tokenMatches(r.Header.Get("X-Setup-Token"), h.setupToken) {
 		writeError(w, http.StatusForbidden, "invalid setup token")
 		return
 	}
@@ -146,6 +146,10 @@ func (h *SetupHandler) CreateKey(w http.ResponseWriter, r *http.Request) {
 		KeyPrefix: rawKey[:12],
 		Scopes:    scopes,
 		ExpiresAt: req.ExpiresAt,
+	}
+	// Attribute the key to the console user who created it (nil for API-key callers).
+	if auth := middleware.AuthFromContext(r.Context()); auth != nil {
+		apiKey.CreatedBy = auth.UserID
 	}
 
 	if err := h.apiKeyStore.Create(r.Context(), apiKey); err != nil {

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"net/http"
 
@@ -12,10 +13,11 @@ import (
 type TenantHandler struct {
 	tenantStore domain.TenantStore
 	apiKeyStore domain.APIKeyStore
+	setupToken  string
 }
 
-func NewTenantHandler(ts domain.TenantStore, aks domain.APIKeyStore) *TenantHandler {
-	return &TenantHandler{tenantStore: ts, apiKeyStore: aks}
+func NewTenantHandler(ts domain.TenantStore, aks domain.APIKeyStore, setupToken string) *TenantHandler {
+	return &TenantHandler{tenantStore: ts, apiKeyStore: aks, setupToken: setupToken}
 }
 
 type createTenantRequest struct {
@@ -28,9 +30,20 @@ type createTenantResponse struct {
 	APIKey string `json:"api_key"`
 }
 
-// Create is the legacy unauthenticated tenant bootstrap endpoint.
-// It still functions but is deprecated — callers receive a Deprecation header.
+// Create is the legacy tenant bootstrap endpoint. It mints a tenant plus a
+// full-scope master key, so it carries the same X-Setup-Token gate as
+// /v1/setup: with no token configured it is disabled entirely.
+// Deprecated — callers receive a Deprecation header.
 func (h *TenantHandler) Create(w http.ResponseWriter, r *http.Request) {
+	if h.setupToken == "" {
+		writeError(w, http.StatusServiceUnavailable, "tenant creation is not configured (ENGRAM_SETUP_TOKEN not set); use POST /v1/setup")
+		return
+	}
+	if !tokenMatches(r.Header.Get("X-Setup-Token"), h.setupToken) {
+		writeError(w, http.StatusForbidden, "invalid setup token")
+		return
+	}
+
 	var req createTenantRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Name == "" {
 		writeError(w, http.StatusBadRequest, "name is required")
@@ -63,3 +76,8 @@ func (h *TenantHandler) Create(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// tokenMatches compares a presented secret against the configured one in
+// constant time.
+func tokenMatches(presented, configured string) bool {
+	return subtle.ConstantTimeCompare([]byte(presented), []byte(configured)) == 1
+}

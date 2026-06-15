@@ -9,12 +9,12 @@ import (
 type FeedbackType string
 
 const (
-	FeedbackTypeUsed        FeedbackType = "used"
-	FeedbackTypeIgnored     FeedbackType = "ignored"
-	FeedbackTypeHelpful     FeedbackType = "helpful"
-	FeedbackTypeUnhelpful   FeedbackType = "unhelpful"
+	FeedbackTypeUsed         FeedbackType = "used"
+	FeedbackTypeIgnored      FeedbackType = "ignored"
+	FeedbackTypeHelpful      FeedbackType = "helpful"
+	FeedbackTypeUnhelpful    FeedbackType = "unhelpful"
 	FeedbackTypeContradicted FeedbackType = "contradicted"
-	FeedbackTypeOutdated    FeedbackType = "outdated"
+	FeedbackTypeOutdated     FeedbackType = "outdated"
 )
 
 func ValidFeedbackType(t string) bool {

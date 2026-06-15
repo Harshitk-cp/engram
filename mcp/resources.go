@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 )
 
@@ -23,12 +24,34 @@ func RegisterResources(s *Server, client *Client) {
 	s.AddResource(
 		Resource{
 			URI:         "engram://agents/{agent_id}/health",
-			Name:        "Agent health",
-			Description: "Memory health snapshot for an agent — tier distribution and recent mutations.",
-			MimeType:    "text/plain",
+			Name:        "Agent knowledge health",
+			Description: "Knowledge-health snapshot for an agent: memory counts by type, average confidence, contradiction count, memories at risk, and uncertainty areas.",
+			MimeType:    "application/json",
 		},
 		"engram://agents/{agent_id}/health",
 		healthResource(client),
+	)
+
+	s.AddResource(
+		Resource{
+			URI:         "engram://agents/{agent_id}/calibration",
+			Name:        "Agent confidence calibration",
+			Description: "Measured calibration of the agent's confidence scores (ECE / MCE / Brier + reliability diagram).",
+			MimeType:    "application/json",
+		},
+		"engram://agents/{agent_id}/calibration",
+		calibrationResource(client),
+	)
+
+	s.AddResource(
+		Resource{
+			URI:         "engram://audit/integrity",
+			Name:        "Audit trail integrity",
+			Description: "Tamper-evidence check of the tenant's memory audit trail (hash-chain verification result).",
+			MimeType:    "application/json",
+		},
+		"engram://audit/integrity",
+		auditIntegrityResource(client),
 	)
 }
 
@@ -63,33 +86,35 @@ func healthResource(client *Client) ResourceHandler {
 		if agentID == "" {
 			return nil, fmt.Errorf("invalid URI: %s", uri)
 		}
-
-		// Use hot memories as a proxy for health until the dedicated health endpoint lands (P2-1).
-		memories, err := client.GetHotMemories(ctx, agentID, 50)
+		raw, err := client.GetRaw(ctx, "/v1/cognitive/health?agent_id="+url.QueryEscape(agentID))
 		if err != nil {
 			return nil, err
 		}
+		return &ResourceContent{URI: uri, MimeType: "application/json", Text: pretty(raw)}, nil
+	}
+}
 
-		var sb strings.Builder
-		sb.WriteString(fmt.Sprintf("Agent: %s\n", agentID))
-		sb.WriteString(fmt.Sprintf("Hot-tier memories: %d\n\n", len(memories)))
-
-		if len(memories) > 0 {
-			sb.WriteString("Top memories by confidence:\n")
-			limit := len(memories)
-			if limit > 10 {
-				limit = 10
-			}
-			for i, m := range memories[:limit] {
-				sb.WriteString(fmt.Sprintf("  %d. [%.2f] %s\n", i+1, m.Confidence, m.Content))
-			}
+func calibrationResource(client *Client) ResourceHandler {
+	return func(ctx context.Context, uri string) (*ResourceContent, error) {
+		agentID := extractAgentID(uri)
+		if agentID == "" {
+			return nil, fmt.Errorf("invalid URI: %s", uri)
 		}
+		raw, err := client.GetRaw(ctx, "/v1/cognitive/calibration?agent_id="+url.QueryEscape(agentID))
+		if err != nil {
+			return nil, err
+		}
+		return &ResourceContent{URI: uri, MimeType: "application/json", Text: pretty(raw)}, nil
+	}
+}
 
-		return &ResourceContent{
-			URI:      uri,
-			MimeType: "text/plain",
-			Text:     sb.String(),
-		}, nil
+func auditIntegrityResource(client *Client) ResourceHandler {
+	return func(ctx context.Context, uri string) (*ResourceContent, error) {
+		raw, err := client.GetRaw(ctx, "/v1/audit/verify")
+		if err != nil {
+			return nil, err
+		}
+		return &ResourceContent{URI: uri, MimeType: "application/json", Text: pretty(raw)}, nil
 	}
 }
 

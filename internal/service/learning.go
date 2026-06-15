@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/Harshitk-cp/engram/internal/domain"
@@ -11,13 +12,28 @@ import (
 	"go.uber.org/zap"
 )
 
+const (
+	// defaultLearningStatsInterval is how often the background worker recomputes
+	// per-agent learning stats (velocity / stability).
+	defaultLearningStatsInterval = 1 * time.Hour
+	// defaultLearningStatsWindow is the trailing window the stats summarize.
+	defaultLearningStatsWindow = 7 * 24 * time.Hour
+)
+
 type LearningService struct {
 	memoryStore          domain.MemoryStore
 	episodeStore         domain.EpisodeStore
 	episodeMemUsageStore domain.EpisodeMemoryUsageStore
 	mutationLogStore     domain.MutationLogStore
 	learningStatsStore   domain.LearningStatsStore
+	uow                  *store.UnitOfWork
 	logger               *zap.Logger
+
+	interval   time.Duration
+	window     time.Duration
+	stopCh     chan struct{}
+	cancelRuns context.CancelFunc
+	wg         sync.WaitGroup
 }
 
 func NewLearningService(
@@ -29,6 +45,15 @@ func NewLearningService(
 		memoryStore:  memoryStore,
 		episodeStore: episodeStore,
 		logger:       logger,
+		interval:     defaultLearningStatsInterval,
+		window:       defaultLearningStatsWindow,
+		stopCh:       make(chan struct{}),
+	}
+}
+
+func (s *LearningService) SetStatsInterval(d time.Duration) {
+	if d > 0 {
+		s.interval = d
 	}
 }
 
@@ -42,6 +67,84 @@ func (s *LearningService) SetMutationLogStore(store domain.MutationLogStore) {
 
 func (s *LearningService) SetLearningStatsStore(store domain.LearningStatsStore) {
 	s.learningStatsStore = store
+}
+
+func (s *LearningService) SetUnitOfWork(uow *store.UnitOfWork) {
+	s.uow = uow
+}
+
+func (s *LearningService) Start() {
+	if s.learningStatsStore == nil || s.mutationLogStore == nil {
+		s.logger.Info("learning-stats worker disabled (stores not wired)")
+		return
+	}
+	baseCtx, cancel := context.WithCancel(context.Background())
+	s.cancelRuns = cancel
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		ticker := time.NewTicker(s.interval)
+		defer ticker.Stop()
+
+		s.logger.Info("learning-stats worker started",
+			zap.Duration("interval", s.interval),
+			zap.Duration("window", s.window))
+
+		s.runStatsTick(baseCtx)
+
+		for {
+			select {
+			case <-ticker.C:
+				s.runStatsTick(baseCtx)
+			case <-s.stopCh:
+				s.logger.Info("learning-stats worker stopped")
+				return
+			}
+		}
+	}()
+}
+
+func (s *LearningService) Stop() {
+	if s.cancelRuns != nil {
+		s.cancelRuns()
+	}
+	close(s.stopCh)
+	s.wg.Wait()
+}
+
+func (s *LearningService) runStatsTick(baseCtx context.Context) {
+	ctx, cancel := context.WithTimeout(baseCtx, 60*time.Second)
+	defer cancel()
+	guardPanic(s.logger, "learning-stats tick", func() {
+		if err := s.RunStats(ctx); err != nil {
+			s.logger.Error("learning-stats run failed", zap.Error(err))
+		}
+	})
+}
+
+func (s *LearningService) RunStats(ctx context.Context) error {
+	if s.learningStatsStore == nil || s.mutationLogStore == nil {
+		return nil
+	}
+
+	agentIDs, err := s.memoryStore.ListDistinctAgentIDs(ctx)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now().UTC()
+	periodEnd := now.Truncate(24 * time.Hour).Add(24 * time.Hour) // start of next UTC day
+	periodStart := periodEnd.Add(-s.window)
+
+	for _, agentID := range agentIDs {
+		if _, err := s.ComputeLearningStats(ctx, agentID, periodStart, periodEnd); err != nil {
+			s.logger.Warn("learning-stats failed for agent",
+				zap.String("agent_id", agentID.String()),
+				zap.Error(err))
+		}
+	}
+
+	return nil
 }
 
 // RecordMemoryUsage records which memories were used during an episode.
@@ -69,11 +172,13 @@ func (s *LearningService) RecordMemoryUsage(ctx context.Context, episodeID uuid.
 	return nil
 }
 
-// RecordOutcome records the outcome of an episode and propagates effects to used memories.
-func (s *LearningService) RecordOutcome(ctx context.Context, record domain.OutcomeRecord) error {
+// RecordOutcome records the outcome of an episode and propagates effects to used
+// memories. All episode and memory lookups are scoped to tenantID so callers
+// cannot mutate (or write audit rows against) another tenant's data.
+func (s *LearningService) RecordOutcome(ctx context.Context, tenantID uuid.UUID, record domain.OutcomeRecord) error {
 	// Update episode outcome
 	if s.episodeStore != nil {
-		if err := s.episodeStore.UpdateOutcome(ctx, record.EpisodeID, record.Outcome, ""); err != nil {
+		if err := s.episodeStore.UpdateOutcome(ctx, record.EpisodeID, tenantID, record.Outcome, ""); err != nil {
 			s.logger.Warn("failed to update episode outcome", zap.Error(err))
 		}
 	}
@@ -96,7 +201,7 @@ func (s *LearningService) RecordOutcome(ctx context.Context, record domain.Outco
 
 	// Apply effect to all memories used
 	for _, memID := range record.MemoriesUsed {
-		if err := s.applyOutcomeEffect(ctx, memID, effect, feedbackType, record.EpisodeID); err != nil {
+		if err := s.applyOutcomeEffect(ctx, tenantID, memID, effect, feedbackType, record.EpisodeID); err != nil {
 			s.logger.Warn("failed to apply outcome effect to memory",
 				zap.String("memory_id", memID.String()),
 				zap.Error(err),
@@ -107,10 +212,10 @@ func (s *LearningService) RecordOutcome(ctx context.Context, record domain.Outco
 	return nil
 }
 
-func (s *LearningService) applyOutcomeEffect(ctx context.Context, memID uuid.UUID, effect domain.FeedbackEffect, feedbackType domain.FeedbackType, episodeID uuid.UUID) error {
-	memory, err := s.getMemoryByIDWithoutTenant(ctx, memID)
-	if err != nil {
-		return err
+func (s *LearningService) applyOutcomeEffect(ctx context.Context, tenantID uuid.UUID, memID uuid.UUID, effect domain.FeedbackEffect, feedbackType domain.FeedbackType, episodeID uuid.UUID) error {
+	memory, err := s.memoryStore.GetByID(ctx, memID, tenantID)
+	if err != nil || memory == nil {
+		return ErrMemoryNotFound
 	}
 
 	oldConfidence := memory.Confidence
@@ -123,27 +228,39 @@ func (s *LearningService) applyOutcomeEffect(ctx context.Context, memID uuid.UUI
 		newReinforcement = 0
 	}
 
-	// Update memory
-	if err := s.memoryStore.UpdateReinforcement(ctx, memory.ID, newConfidence, newReinforcement); err != nil {
-		return err
+	mutation := &domain.MutationLog{
+		MemoryID:              memory.ID,
+		AgentID:               memory.AgentID,
+		TenantID:              &memory.TenantID,
+		MutationType:          domain.MutationOutcome,
+		SourceType:            domain.MutationSourceSystem,
+		SourceID:              &episodeID,
+		OldConfidence:         &oldConfidence,
+		NewConfidence:         &newConfidence,
+		OldReinforcementCount: &oldReinforcement,
+		NewReinforcementCount: &newReinforcement,
+		Reason:                "outcome: " + string(feedbackType),
 	}
 
-	// Log mutation
-	if s.mutationLogStore != nil {
-		mutation := &domain.MutationLog{
-			MemoryID:              memory.ID,
-			AgentID:               memory.AgentID,
-			MutationType:          domain.MutationOutcome,
-			SourceType:            domain.MutationSourceSystem,
-			SourceID:              &episodeID,
-			OldConfidence:         &oldConfidence,
-			NewConfidence:         &newConfidence,
-			OldReinforcementCount: &oldReinforcement,
-			NewReinforcementCount: &newReinforcement,
-			Reason:                "outcome: " + string(feedbackType),
+	if s.uow != nil {
+		// Atomic path: memory update + audit row commit together.
+		if err := s.uow.Do(ctx, func(st *store.TxStores) error {
+			if err := st.Memory.UpdateReinforcement(ctx, memory.ID, newConfidence, newReinforcement); err != nil {
+				return err
+			}
+			return st.MutationLog.Create(ctx, mutation)
+		}); err != nil {
+			return err
 		}
-		if err := s.mutationLogStore.Create(ctx, mutation); err != nil {
-			s.logger.Warn("failed to log mutation", zap.Error(err))
+	} else {
+		// Fallback (no unit of work, e.g. unit tests): non-atomic.
+		if err := s.memoryStore.UpdateReinforcement(ctx, memory.ID, newConfidence, newReinforcement); err != nil {
+			return err
+		}
+		if s.mutationLogStore != nil {
+			if err := s.mutationLogStore.Create(ctx, mutation); err != nil {
+				s.logger.Warn("failed to log mutation", zap.Error(err))
+			}
 		}
 	}
 
@@ -155,15 +272,6 @@ func (s *LearningService) applyOutcomeEffect(ctx context.Context, memID uuid.UUI
 	)
 
 	return nil
-}
-
-// getMemoryByIDWithoutTenant is a helper to find a memory by ID without requiring tenant context.
-func (s *LearningService) getMemoryByIDWithoutTenant(ctx context.Context, memID uuid.UUID) (*domain.Memory, error) {
-	mem, err := s.memoryStore.GetByIDOnly(ctx, memID)
-	if err == nil {
-		return mem, nil
-	}
-	return nil, ErrMemoryNotFound
 }
 
 // GetLearningStats returns aggregated learning statistics for an agent.
@@ -183,6 +291,18 @@ func (s *LearningService) GetLearningStats(ctx context.Context, agentID uuid.UUI
 }
 
 // ComputeLearningStats computes and stores learning statistics for an agent over a time period.
+// countsTowardLearning reports whether a mutation type reflects the agent
+// actually learning (and so should move learning_velocity), as opposed to passive
+// decay or operator/maintenance actions.
+func countsTowardLearning(t domain.MutationType) bool {
+	switch t {
+	case domain.MutationFeedback, domain.MutationOutcome, domain.MutationReinforcement, domain.MutationContradiction:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *LearningService) ComputeLearningStats(ctx context.Context, agentID uuid.UUID, periodStart, periodEnd time.Time) (*domain.LearningStats, error) {
 	if s.mutationLogStore == nil || s.learningStatsStore == nil {
 		return nil, nil
@@ -200,13 +320,17 @@ func (s *LearningService) ComputeLearningStats(ctx context.Context, agentID uuid
 		PeriodEnd:   periodEnd,
 	}
 
+	contradictionEvents := 0
+
 	for _, m := range mutations {
 		if m.CreatedAt.After(periodEnd) {
 			continue
 		}
 
-		// Count confidence changes
-		if m.OldConfidence != nil && m.NewConfidence != nil {
+		// Only agent learning signals count toward velocity. Passive decay and
+		// operator events (deletion/archive/admin_override/redaction) are excluded
+		// so they don't swamp or corrupt learning_velocity.
+		if countsTowardLearning(m.MutationType) && m.OldConfidence != nil && m.NewConfidence != nil {
 			if *m.NewConfidence > *m.OldConfidence {
 				stats.ConfidenceIncreases++
 			} else if *m.NewConfidence < *m.OldConfidence {
@@ -216,6 +340,8 @@ func (s *LearningService) ComputeLearningStats(ctx context.Context, agentID uuid
 
 		// Count by mutation type
 		switch m.MutationType {
+		case domain.MutationContradiction:
+			contradictionEvents++
 		case domain.MutationReinforcement:
 			stats.MemoriesReinforced++
 		case domain.MutationFeedback:
@@ -251,11 +377,27 @@ func (s *LearningService) ComputeLearningStats(ctx context.Context, agentID uuid
 		}
 	}
 
-	// Compute derived metrics
+	// Compute derived metrics.
+	//
+	// LearningVelocity: net direction of confidence movement, in [-1, 1].
+	// +1 = every learning signal raised confidence (rapidly acquiring beliefs),
+	// -1 = every signal lowered it (beliefs being walked back), 0 = balanced.
 	totalChanges := float32(stats.ConfidenceIncreases + stats.ConfidenceDecreases)
 	if totalChanges > 0 {
 		velocity := float32(stats.ConfidenceIncreases-stats.ConfidenceDecreases) / totalChanges
 		stats.LearningVelocity = &velocity
+	}
+
+	// StabilityScore: of the times existing beliefs were touched, the share that
+	// held up versus had to be overturned, in [0, 1]. 1.0 = nothing contradicted
+	// or marked stale (settled knowledge); 0.0 = everything overturned (volatile).
+	// Orthogonal to velocity, which only measures confidence direction.
+	reinforced := stats.HelpfulCount + stats.SuccessCount + stats.MemoriesReinforced
+	overturned := stats.UnhelpfulCount + stats.ContradictedCount + stats.OutdatedCount + stats.FailureCount + contradictionEvents
+	touched := float32(reinforced + overturned)
+	if touched > 0 {
+		stability := float32(reinforced) / touched
+		stats.StabilityScore = &stability
 	}
 
 	// Store stats

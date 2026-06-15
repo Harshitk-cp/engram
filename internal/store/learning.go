@@ -12,33 +12,91 @@ import (
 )
 
 type MutationLogStore struct {
-	db *pgxpool.Pool
+	db   DBTX
+	pool *pgxpool.Pool
 }
 
 func NewMutationLogStore(db *pgxpool.Pool) *MutationLogStore {
-	return &MutationLogStore{db: db}
+	return &MutationLogStore{db: db, pool: db}
+}
+
+// withTx returns a clone of the store that runs against the given transaction.
+func (s *MutationLogStore) withTx(tx pgx.Tx) *MutationLogStore {
+	return &MutationLogStore{db: tx, pool: s.pool}
 }
 
 func (s *MutationLogStore) Create(ctx context.Context, m *domain.MutationLog) error {
-	return s.db.QueryRow(ctx,
-		`INSERT INTO mutation_log (memory_id, agent_id, mutation_type, source_type, source_id, old_confidence, new_confidence, old_reinforcement_count, new_reinforcement_count, reason, metadata)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	return insertMutationLog(ctx, s.db, m)
+}
+
+// insertMutationLog writes one audit row against any DBTX (pool or tx), so
+// deletion/archive paths can log atomically inside their own transaction.
+func insertMutationLog(ctx context.Context, db DBTX, m *domain.MutationLog) error {
+	return db.QueryRow(ctx,
+		`INSERT INTO mutation_log (memory_id, agent_id, mutation_type, source_type, source_id, old_confidence, new_confidence, old_reinforcement_count, new_reinforcement_count, reason, metadata, tenant_id, anchor_id, binding, content_hash, content_snapshot, actor_type, actor_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 		 RETURNING id, created_at`,
-		m.MemoryID, m.AgentID, m.MutationType, m.SourceType, m.SourceID, m.OldConfidence, m.NewConfidence, m.OldReinforcementCount, m.NewReinforcementCount, m.Reason, m.Metadata,
+		m.MemoryID, m.AgentID, m.MutationType, m.SourceType, m.SourceID, m.OldConfidence, m.NewConfidence, m.OldReinforcementCount, m.NewReinforcementCount, m.Reason, m.Metadata, m.TenantID, m.AnchorID, nullIfEmpty(m.Binding), nullIfEmpty(m.ContentHash), m.ContentSnapshot, nullIfEmpty(m.ActorType), m.ActorID,
 	).Scan(&m.ID, &m.CreatedAt)
 }
 
-func (s *MutationLogStore) GetByMemoryID(ctx context.Context, memoryID uuid.UUID, limit int) ([]domain.MutationLog, error) {
+// nullIfEmpty maps "" to a SQL NULL so optional text columns stay null rather
+// than storing empty strings.
+func nullIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
+// CalibrationSamples returns labeled (predicted-confidence, outcome) pairs
+// drawn from evidence events: feedback, outcome, and contradiction mutations
+// that carry both the pre-event confidence and a post-event confidence. The
+// label is the sign of the confidence change — evidence that raised (or held)
+// confidence confirmed the belief; evidence that lowered it refuted the belief.
+// Optionally scoped to one agent. Decay/reinforcement-by-disuse and system
+// housekeeping are excluded because they are not external evidence.
+func (s *MutationLogStore) CalibrationSamples(ctx context.Context, tenantID uuid.UUID, agentID *uuid.UUID) ([]domain.CalibrationSample, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT old_confidence, new_confidence
+		   FROM mutation_log
+		  WHERE tenant_id = $1
+		    AND ($2::uuid IS NULL OR agent_id = $2)
+		    AND mutation_type IN ('feedback', 'outcome', 'contradiction')
+		    AND old_confidence IS NOT NULL
+		    AND new_confidence IS NOT NULL`,
+		tenantID, agentID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.CalibrationSample
+	for rows.Next() {
+		var oldConf, newConf float32
+		if err := rows.Scan(&oldConf, &newConf); err != nil {
+			return nil, err
+		}
+		out = append(out, domain.CalibrationSample{
+			Confidence: float64(oldConf),
+			Correct:    newConf >= oldConf,
+		})
+	}
+	return out, rows.Err()
+}
+
+func (s *MutationLogStore) GetByMemoryID(ctx context.Context, memoryID uuid.UUID, tenantID uuid.UUID, limit int) ([]domain.MutationLog, error) {
 	if limit <= 0 {
 		limit = 100
 	}
 
 	rows, err := s.db.Query(ctx,
 		`SELECT id, memory_id, agent_id, mutation_type, source_type, source_id, old_confidence, new_confidence, old_reinforcement_count, new_reinforcement_count, reason, metadata, created_at
-		 FROM mutation_log WHERE memory_id = $1
+		 FROM mutation_log WHERE memory_id = $1 AND tenant_id = $2
 		 ORDER BY created_at DESC
-		 LIMIT $2`,
-		memoryID, limit,
+		 LIMIT $3`,
+		memoryID, tenantID, limit,
 	)
 	if err != nil {
 		return nil, err
@@ -50,6 +108,48 @@ func (s *MutationLogStore) GetByMemoryID(ctx context.Context, memoryID uuid.UUID
 		var m domain.MutationLog
 		if err := rows.Scan(&m.ID, &m.MemoryID, &m.AgentID, &m.MutationType, &m.SourceType, &m.SourceID, &m.OldConfidence, &m.NewConfidence, &m.OldReinforcementCount, &m.NewReinforcementCount, &m.Reason, &m.Metadata, &m.CreatedAt); err != nil {
 			return nil, err
+		}
+		logs = append(logs, m)
+	}
+	return logs, rows.Err()
+}
+
+// ChainEntries returns recent audit-log rows for a tenant — including the
+// tamper-evident chain fields (seq, prev_hash, row_hash) — for visualizing the
+// hash chain in the console. Optionally filtered to one agent; note the chain
+// itself is per-tenant (seqs are global), so a filtered view shows that agent's
+// records within the larger chain (seqs may not be contiguous).
+func (s *MutationLogStore) ChainEntries(ctx context.Context, tenantID uuid.UUID, agentID *uuid.UUID, limit int) ([]domain.MutationLog, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.db.Query(ctx,
+		`SELECT id, memory_id, agent_id, mutation_type, source_type, old_confidence, new_confidence,
+		        reason, COALESCE(content_hash, ''), COALESCE(actor_type, ''), created_at,
+		        seq, COALESCE(prev_hash, ''), COALESCE(row_hash, '')
+		   FROM mutation_log
+		  WHERE tenant_id = $1
+		    AND ($2::uuid IS NULL OR agent_id = $2)
+		  ORDER BY seq DESC
+		  LIMIT $3`,
+		tenantID, agentID, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var logs []domain.MutationLog
+	for rows.Next() {
+		var m domain.MutationLog
+		var memID *uuid.UUID
+		if err := rows.Scan(&m.ID, &memID, &m.AgentID, &m.MutationType, &m.SourceType,
+			&m.OldConfidence, &m.NewConfidence, &m.Reason, &m.ContentHash, &m.ActorType,
+			&m.CreatedAt, &m.Seq, &m.PrevHash, &m.RowHash); err != nil {
+			return nil, err
+		}
+		if memID != nil {
+			m.MemoryID = *memID
 		}
 		logs = append(logs, m)
 	}
@@ -82,6 +182,54 @@ func (s *MutationLogStore) GetByAgentID(ctx context.Context, agentID uuid.UUID, 
 		logs = append(logs, m)
 	}
 	return logs, rows.Err()
+}
+
+// VerifyChain walks the tenant's audit hash chain in the DB and reports whether
+// it is intact, how many rows verified, the first broken seq (nil if intact),
+// and a human-readable reason when broken. The DB function also cross-checks
+// the walked chain against audit_chain_heads, so tail truncation fails too.
+func (s *MutationLogStore) VerifyChain(ctx context.Context, tenantID uuid.UUID) (valid bool, checked int64, breakSeq *int64, reason *string, err error) {
+	err = s.db.QueryRow(ctx,
+		`SELECT valid, checked, break_seq, reason FROM verify_audit_chain($1)`, tenantID,
+	).Scan(&valid, &checked, &breakSeq, &reason)
+	return valid, checked, breakSeq, reason, err
+}
+
+// ChainHead returns the tenant's current chain length and head hash (the value an
+// auditor anchors against). Returns (0, "") for an empty chain.
+func (s *MutationLogStore) ChainHead(ctx context.Context, tenantID uuid.UUID) (int64, string, error) {
+	var seq int64
+	var hash string
+	err := s.db.QueryRow(ctx,
+		`SELECT last_seq, last_hash FROM audit_chain_heads WHERE tenant_id = $1`, tenantID,
+	).Scan(&seq, &hash)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, "", nil
+	}
+	return seq, hash, err
+}
+
+// ExportByTenant returns the full audit trail for a tenant ordered by chain seq,
+// including the hash-chain fields, for signed export.
+func (s *MutationLogStore) ExportByTenant(ctx context.Context, tenantID uuid.UUID) ([]domain.MutationLog, error) {
+	rows, err := s.db.Query(ctx,
+		`SELECT id, memory_id, agent_id, mutation_type, source_type, source_id, old_confidence, new_confidence, reason, metadata, tenant_id, anchor_id, COALESCE(binding,''), COALESCE(content_hash,''), content_snapshot, COALESCE(actor_type,''), actor_id, created_at, COALESCE(seq,0), COALESCE(prev_hash,''), COALESCE(row_hash,'')
+		 FROM mutation_log WHERE tenant_id = $1 ORDER BY seq`,
+		tenantID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.MutationLog
+	for rows.Next() {
+		var m domain.MutationLog
+		if err := rows.Scan(&m.ID, &m.MemoryID, &m.AgentID, &m.MutationType, &m.SourceType, &m.SourceID, &m.OldConfidence, &m.NewConfidence, &m.Reason, &m.Metadata, &m.TenantID, &m.AnchorID, &m.Binding, &m.ContentHash, &m.ContentSnapshot, &m.ActorType, &m.ActorID, &m.CreatedAt, &m.Seq, &m.PrevHash, &m.RowHash); err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
 
 type EpisodeMemoryUsageStore struct {

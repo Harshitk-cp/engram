@@ -40,14 +40,12 @@ func (h *AgentHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.ExternalID == "" {
-		writeError(w, http.StatusBadRequest, "external_id is required")
-		return
-	}
 	if req.Name == "" {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
+	// external_id is optional — the service derives a unique one from the name
+	// when the caller doesn't supply their own.
 
 	agent := &domain.Agent{
 		TenantID:   tenant.ID,
@@ -96,9 +94,14 @@ func (h *AgentHandler) List(w http.ResponseWriter, r *http.Request) {
 	if agents == nil {
 		agents = []domain.Agent{}
 	}
+	total, err := h.svc.Count(r.Context(), tenant.ID)
+	if err != nil {
+		total = len(agents)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"agents": agents,
+		"total":  total,
 		"count":  len(agents),
 		"limit":  limit,
 		"offset": offset,

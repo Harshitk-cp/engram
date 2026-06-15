@@ -50,11 +50,11 @@ func TestFeedbackEffects(t *testing.T) {
 			expectedReview:     true,
 		},
 		{
-			name:              "outdated triggers summarize",
-			feedbackType:      domain.FeedbackTypeOutdated,
-			expectedLogOdds:   -0.8,
+			name:               "outdated triggers summarize",
+			feedbackType:       domain.FeedbackTypeOutdated,
+			expectedLogOdds:    -0.8,
 			expectedReinfDelta: -1,
-			expectedSummarize: true,
+			expectedSummarize:  true,
 		},
 	}
 
@@ -113,7 +113,7 @@ func (m *mockMutationLogStore) Create(ctx context.Context, log *domain.MutationL
 	return nil
 }
 
-func (m *mockMutationLogStore) GetByMemoryID(ctx context.Context, memoryID uuid.UUID, limit int) ([]domain.MutationLog, error) {
+func (m *mockMutationLogStore) GetByMemoryID(ctx context.Context, memoryID uuid.UUID, tenantID uuid.UUID, limit int) ([]domain.MutationLog, error) {
 	var result []domain.MutationLog
 	for _, log := range m.logs {
 		if log.MemoryID == memoryID {
@@ -137,6 +137,153 @@ func (m *mockMutationLogStore) GetByAgentID(ctx context.Context, agentID uuid.UU
 		}
 	}
 	return result, nil
+}
+
+func (m *mockMutationLogStore) CalibrationSamples(ctx context.Context, tenantID uuid.UUID, agentID *uuid.UUID) ([]domain.CalibrationSample, error) {
+	var out []domain.CalibrationSample
+	for _, log := range m.logs {
+		if log.OldConfidence == nil || log.NewConfidence == nil {
+			continue
+		}
+		switch log.MutationType {
+		case domain.MutationFeedback, domain.MutationOutcome, domain.MutationContradiction:
+			if agentID != nil && log.AgentID != *agentID {
+				continue
+			}
+			out = append(out, domain.CalibrationSample{
+				Confidence: float64(*log.OldConfidence),
+				Correct:    *log.NewConfidence >= *log.OldConfidence,
+			})
+		}
+	}
+	return out, nil
+}
+
+type mockLearningStatsStore struct {
+	last *domain.LearningStats
+}
+
+func (m *mockLearningStatsStore) Upsert(ctx context.Context, s *domain.LearningStats) error {
+	m.last = s
+	return nil
+}
+func (m *mockLearningStatsStore) GetByAgentID(ctx context.Context, agentID uuid.UUID, limit int) ([]domain.LearningStats, error) {
+	return nil, nil
+}
+func (m *mockLearningStatsStore) GetLatest(ctx context.Context, agentID uuid.UUID) (*domain.LearningStats, error) {
+	return m.last, nil
+}
+
+// TestComputeLearningStats_ExcludesNonLearningMutations ensures decay and
+// operator events (deletion/archive/admin_override/redaction) do not move
+// learning_velocity — only genuine learning signals count.
+func TestComputeLearningStats_ExcludesNonLearningMutations(t *testing.T) {
+	agentID := uuid.New()
+	memID := uuid.New()
+	now := time.Now()
+
+	mut := func(mt domain.MutationType, old, newC float32) domain.MutationLog {
+		o, n := old, newC
+		return domain.MutationLog{
+			MemoryID: memID, AgentID: agentID, MutationType: mt,
+			OldConfidence: &o, NewConfidence: &n, CreatedAt: now,
+		}
+	}
+	mutationStore := &mockMutationLogStore{logs: []domain.MutationLog{
+		mut(domain.MutationFeedback, 0.5, 0.7),       // +1 increase (counts)
+		mut(domain.MutationOutcome, 0.7, 0.6),        // +1 decrease (counts)
+		mut(domain.MutationDecay, 0.6, 0.5),          // excluded
+		mut(domain.MutationDeletion, 0.5, 0.0),       // excluded
+		mut(domain.MutationArchive, 0.5, 0.5),        // excluded
+		mut(domain.MutationAdminOverride, 0.5, 0.95), // excluded
+		mut(domain.MutationRedaction, 0.95, 0.0),     // excluded
+	}}
+	statsStore := &mockLearningStatsStore{}
+
+	svc := NewLearningService(newMockMemoryStore(), nil, testLogger())
+	svc.SetMutationLogStore(mutationStore)
+	svc.SetLearningStatsStore(statsStore)
+
+	stats, err := svc.ComputeLearningStats(context.Background(), agentID, now.Add(-time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ComputeLearningStats: %v", err)
+	}
+	if stats.ConfidenceIncreases != 1 {
+		t.Errorf("ConfidenceIncreases = %d, want 1 (only feedback)", stats.ConfidenceIncreases)
+	}
+	if stats.ConfidenceDecreases != 1 {
+		t.Errorf("ConfidenceDecreases = %d, want 1 (only outcome)", stats.ConfidenceDecreases)
+	}
+}
+
+// TestComputeLearningStats_VelocityAndStability verifies the two derived
+// dashboard metrics: velocity (net confidence direction, [-1,1]) and stability
+// (share of touched beliefs that held up vs. were overturned, [0,1]).
+func TestComputeLearningStats_VelocityAndStability(t *testing.T) {
+	agentID := uuid.New()
+	memID := uuid.New()
+	now := time.Now()
+
+	mut := func(mt domain.MutationType, reason string, old, newC float32) domain.MutationLog {
+		o, n := old, newC
+		return domain.MutationLog{
+			MemoryID: memID, AgentID: agentID, MutationType: mt, Reason: reason,
+			OldConfidence: &o, NewConfidence: &n, CreatedAt: now,
+		}
+	}
+	mutationStore := &mockMutationLogStore{logs: []domain.MutationLog{
+		mut(domain.MutationFeedback, "feedback: helpful", 0.5, 0.7),      // inc, helpful
+		mut(domain.MutationFeedback, "feedback: helpful", 0.6, 0.8),      // inc, helpful
+		mut(domain.MutationFeedback, "feedback: contradicted", 0.8, 0.5), // dec, contradicted
+		mut(domain.MutationReinforcement, "reinforce", 0.7, 0.8),         // inc, reinforced
+	}}
+	statsStore := &mockLearningStatsStore{}
+
+	svc := NewLearningService(newMockMemoryStore(), nil, testLogger())
+	svc.SetMutationLogStore(mutationStore)
+	svc.SetLearningStatsStore(statsStore)
+
+	stats, err := svc.ComputeLearningStats(context.Background(), agentID, now.Add(-time.Hour), now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ComputeLearningStats: %v", err)
+	}
+
+	if stats.LearningVelocity == nil {
+		t.Fatal("LearningVelocity is nil, want a value")
+	}
+	if got := *stats.LearningVelocity; got < 0.49 || got > 0.51 {
+		t.Errorf("LearningVelocity = %f, want ~0.50 ((3-1)/4)", got)
+	}
+
+	if stats.StabilityScore == nil {
+		t.Fatal("StabilityScore is nil, want a value")
+	}
+	if got := *stats.StabilityScore; got < 0.74 || got > 0.76 {
+		t.Errorf("StabilityScore = %f, want ~0.75 (reinforced 3 / touched 4)", got)
+	}
+}
+
+// TestComputeLearningStats_NoSignals leaves both derived metrics nil so the
+// dashboard renders "—" rather than a misleading 0.
+func TestComputeLearningStats_NoSignals(t *testing.T) {
+	agentID := uuid.New()
+	mutationStore := &mockMutationLogStore{logs: nil}
+	statsStore := &mockLearningStatsStore{}
+
+	svc := NewLearningService(newMockMemoryStore(), nil, testLogger())
+	svc.SetMutationLogStore(mutationStore)
+	svc.SetLearningStatsStore(statsStore)
+
+	stats, err := svc.ComputeLearningStats(context.Background(), agentID, time.Now().Add(-time.Hour), time.Now())
+	if err != nil {
+		t.Fatalf("ComputeLearningStats: %v", err)
+	}
+	if stats.LearningVelocity != nil {
+		t.Errorf("LearningVelocity = %v, want nil", *stats.LearningVelocity)
+	}
+	if stats.StabilityScore != nil {
+		t.Errorf("StabilityScore = %v, want nil", *stats.StabilityScore)
+	}
 }
 
 func TestLearningService_RecordOutcome_Success(t *testing.T) {
@@ -168,7 +315,7 @@ func TestLearningService_RecordOutcome_Success(t *testing.T) {
 		OccurredAt:   time.Now(),
 	}
 
-	err := svc.RecordOutcome(context.Background(), record)
+	err := svc.RecordOutcome(context.Background(), tenantID, record)
 	if err != nil {
 		t.Fatalf("RecordOutcome failed: %v", err)
 	}
@@ -222,7 +369,7 @@ func TestLearningService_RecordOutcome_Failure(t *testing.T) {
 		OccurredAt:   time.Now(),
 	}
 
-	err := svc.RecordOutcome(context.Background(), record)
+	err := svc.RecordOutcome(context.Background(), tenantID, record)
 	if err != nil {
 		t.Fatalf("RecordOutcome failed: %v", err)
 	}
@@ -278,7 +425,7 @@ func TestLearningService_RecordOutcome_Neutral(t *testing.T) {
 		OccurredAt:   time.Now(),
 	}
 
-	err := svc.RecordOutcome(context.Background(), record)
+	err := svc.RecordOutcome(context.Background(), tenantID, record)
 	if err != nil {
 		t.Fatalf("RecordOutcome failed: %v", err)
 	}
@@ -343,7 +490,7 @@ func TestConfidenceBounds(t *testing.T) {
 				OccurredAt:   time.Now(),
 			}
 
-			_ = svc.RecordOutcome(context.Background(), record)
+			_ = svc.RecordOutcome(context.Background(), tenantID, record)
 
 			updated, _ := memStore.GetByID(context.Background(), mem.ID, tenantID)
 			if updated.Confidence < tt.expectedConf-0.001 || updated.Confidence > tt.expectedConf+0.001 {

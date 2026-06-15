@@ -52,6 +52,12 @@ func (s *AgentStore) GetByID(ctx context.Context, id uuid.UUID, tenantID uuid.UU
 	return a, nil
 }
 
+func (s *AgentStore) CountByTenant(ctx context.Context, tenantID uuid.UUID) (int, error) {
+	var n int
+	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM agents WHERE tenant_id = $1`, tenantID).Scan(&n)
+	return n, err
+}
+
 func (s *AgentStore) ListByTenantID(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]domain.Agent, error) {
 	if limit <= 0 {
 		limit = 50

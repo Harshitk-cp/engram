@@ -131,7 +131,8 @@ func countMastered(learned map[string]int) int {
 func printResults(errors []int, rounds, perRound, procedures int, learned map[string]int) {
 	printHeader("RESULTS")
 
-	fmt.Println("Error Rate by Round:\n")
+	fmt.Println("Error Rate by Round:")
+	fmt.Println()
 	for i := 0; i < rounds; i++ {
 		rate := float64(errors[i]) / float64(perRound)
 		bar := strings.Repeat("█", int(rate*40)) + strings.Repeat("░", 40-int(rate*40))
@@ -224,5 +225,6 @@ func post(path string, body any) []byte {
 func printHeader(title string) {
 	fmt.Println("\n╔════════════════════════════════════════════════════════════╗")
 	fmt.Printf("║  %-56s  ║\n", title)
-	fmt.Println("╚════════════════════════════════════════════════════════════╝\n")
+	fmt.Println("╚════════════════════════════════════════════════════════════╝")
+	fmt.Println()
 }

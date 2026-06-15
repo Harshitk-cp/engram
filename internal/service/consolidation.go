@@ -25,11 +25,11 @@ const (
 	SchemaMinEvidenceCount = 5 // Minimum memories to form a schema
 
 	// Pruning
-	RedundancyThreshold         = 0.92 // Merge memories above this similarity
-	ProcedureMergeThreshold     = 0.9  // Merge procedures above this similarity
-	ProceduralDecayRate         = 0.01 // Very slow decay for procedures
-	SchemaDecayRate             = 0.005 // Almost no decay for schemas
-	MinProcedureSuccessRate     = 0.2   // Archive procedures below this
+	RedundancyThreshold     = 0.92  // Merge memories above this similarity
+	ProcedureMergeThreshold = 0.9   // Merge procedures above this similarity
+	ProceduralDecayRate     = 0.01  // Very slow decay for procedures
+	SchemaDecayRate         = 0.005 // Almost no decay for schemas
+	MinProcedureSuccessRate = 0.2   // Archive procedures below this
 )
 
 // ConsolidationResult contains the results of a consolidation run.
@@ -49,16 +49,16 @@ type ConsolidationResult struct {
 
 // MemoryHealthStats contains statistics about memory system health.
 type MemoryHealthStats struct {
-	EpisodicCount        int      `json:"episodic_count"`
-	SemanticCount        int      `json:"semantic_count"`
-	ProceduralCount      int      `json:"procedural_count"`
-	SchemaCount          int      `json:"schema_count"`
-	MemoriesAtRisk       int      `json:"memories_at_risk"` // confidence/strength < 0.3
-	RecentlyReinforced   int      `json:"recently_reinforced"`
-	ContradictionCount   int      `json:"contradiction_count"`
-	UncertaintyAreas     []string `json:"uncertainty_areas"`
-	AverageConfidence    float32  `json:"average_confidence"`
-	OldestUnprocessed    *time.Time `json:"oldest_unprocessed,omitempty"`
+	EpisodicCount      int        `json:"episodic_count"`
+	SemanticCount      int        `json:"semantic_count"`
+	ProceduralCount    int        `json:"procedural_count"`
+	SchemaCount        int        `json:"schema_count"`
+	MemoriesAtRisk     int        `json:"memories_at_risk"` // confidence/strength < 0.3
+	RecentlyReinforced int        `json:"recently_reinforced"`
+	ContradictionCount int        `json:"contradiction_count"`
+	UncertaintyAreas   []string   `json:"uncertainty_areas"`
+	AverageConfidence  float32    `json:"average_confidence"`
+	OldestUnprocessed  *time.Time `json:"oldest_unprocessed,omitempty"`
 }
 
 const (
@@ -80,9 +80,10 @@ type ConsolidationService struct {
 	decayService       *DecayService
 
 	// Background worker fields
-	interval time.Duration
-	stopCh   chan struct{}
-	wg       sync.WaitGroup
+	interval   time.Duration
+	stopCh     chan struct{}
+	cancelRuns context.CancelFunc
+	wg         sync.WaitGroup
 }
 
 // NewConsolidationService creates a new consolidation service.
@@ -128,6 +129,8 @@ func (s *ConsolidationService) SetGraphStore(gs domain.GraphStore) {
 
 // Start begins the background consolidation worker.
 func (s *ConsolidationService) Start() {
+	baseCtx, cancel := context.WithCancel(context.Background())
+	s.cancelRuns = cancel
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -139,9 +142,9 @@ func (s *ConsolidationService) Start() {
 		for {
 			select {
 			case <-ticker.C:
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-				s.runConsolidation(ctx)
-				cancel()
+				ctx, tickCancel := context.WithTimeout(baseCtx, 30*time.Minute)
+				guardPanic(s.logger, "consolidation tick", func() { s.runConsolidation(ctx) })
+				tickCancel()
 			case <-s.stopCh:
 				s.logger.Info("consolidation worker stopped")
 				return
@@ -150,8 +153,12 @@ func (s *ConsolidationService) Start() {
 	}()
 }
 
-// Stop halts the background consolidation worker.
+// Stop halts the background consolidation worker, cancelling any in-flight
+// pass so shutdown is not held for the remainder of a long tick.
 func (s *ConsolidationService) Stop() {
+	if s.cancelRuns != nil {
+		s.cancelRuns()
+	}
 	close(s.stopCh)
 	s.wg.Wait()
 }
@@ -165,6 +172,9 @@ func (s *ConsolidationService) runConsolidation(ctx context.Context) {
 	}
 
 	for _, agentID := range agents {
+		if ctx.Err() != nil {
+			return
+		}
 		// Get tenant ID for this agent - we need it from the memory store
 		tenantID, err := s.getTenantForAgent(ctx, agentID)
 		if err != nil {
@@ -172,11 +182,17 @@ func (s *ConsolidationService) runConsolidation(ctx context.Context) {
 			continue
 		}
 
-		result, err := s.Consolidate(ctx, agentID, tenantID, ConsolidationScopeRecent)
+		var result *ConsolidationResult
+		guardPanic(s.logger, "consolidation agent "+agentID.String(), func() {
+			result, err = s.Consolidate(ctx, agentID, tenantID, ConsolidationScopeRecent)
+		})
 		if err != nil {
 			s.logger.Error("consolidation failed",
 				zap.String("agent_id", agentID.String()),
 				zap.Error(err))
+			continue
+		}
+		if result == nil { // tick panicked for this agent; already logged
 			continue
 		}
 
@@ -334,6 +350,7 @@ func (s *ConsolidationService) createEpisodeAssociations(ctx context.Context, ep
 		if err == nil {
 			for _, mem := range similar {
 				assoc := &domain.MemoryAssociation{
+					TenantID:            ep.TenantID,
 					SourceMemoryType:    domain.ActivatedMemoryTypeEpisodic,
 					SourceMemoryID:      ep.ID,
 					TargetMemoryType:    domain.ActivatedMemoryTypeSemantic,
@@ -376,7 +393,17 @@ func (s *ConsolidationService) extractSemanticBeliefs(ctx context.Context, agent
 		episodes = append(episodes, processedEps...)
 	}
 
+	// The two queries can overlap (stage 1 may have just flipped an episode to
+	// "processed"), so dedupe by ID — otherwise the same episode is extracted
+	// twice before the first LinkDerivedMemory lands.
+	seen := make(map[uuid.UUID]bool, len(episodes))
+
 	for _, ep := range episodes {
+		if seen[ep.ID] {
+			continue
+		}
+		seen[ep.ID] = true
+
 		if ep.ConsolidationStatus != domain.ConsolidationProcessed {
 			continue
 		}
@@ -453,6 +480,7 @@ func (s *ConsolidationService) extractSemanticBeliefs(ctx context.Context, agent
 			// Create association
 			if s.assocStore != nil {
 				assoc := &domain.MemoryAssociation{
+					TenantID:            ep.TenantID,
 					SourceMemoryType:    domain.ActivatedMemoryTypeEpisodic,
 					SourceMemoryID:      ep.ID,
 					TargetMemoryType:    domain.ActivatedMemoryTypeSemantic,
@@ -564,6 +592,7 @@ func (s *ConsolidationService) learnProcedures(ctx context.Context, agentID uuid
 		// Create association
 		if s.assocStore != nil {
 			assoc := &domain.MemoryAssociation{
+				TenantID:            ep.TenantID,
 				SourceMemoryType:    domain.ActivatedMemoryTypeEpisodic,
 				SourceMemoryID:      ep.ID,
 				TargetMemoryType:    domain.ActivatedMemoryTypeProcedural,
@@ -697,6 +726,7 @@ func (s *ConsolidationService) formSchemas(ctx context.Context, agentID uuid.UUI
 		if s.assocStore != nil {
 			for _, memID := range cluster.MemoryIDs {
 				assoc := &domain.MemoryAssociation{
+					TenantID:            tenantID,
 					SourceMemoryType:    domain.ActivatedMemoryTypeSemantic,
 					SourceMemoryID:      memID,
 					TargetMemoryType:    domain.ActivatedMemoryTypeSchema,
@@ -729,7 +759,7 @@ func (s *ConsolidationService) clusterMemories(memories []domain.Memory) []domai
 		cluster := domain.MemoryCluster{
 			Memories:  []domain.Memory{seed},
 			MemoryIDs: []uuid.UUID{seed.ID},
-			Centroid:  seed.Embedding,
+			Centroid:  cloneVector(seed.Embedding),
 		}
 		assigned[seed.ID] = true
 
@@ -745,8 +775,7 @@ func (s *ConsolidationService) clusterMemories(memories []domain.Memory) []domai
 				cluster.MemoryIDs = append(cluster.MemoryIDs, candidate.ID)
 				assigned[candidate.ID] = true
 
-				// Update centroid (simple average)
-				cluster.Centroid = averageVectors(cluster.Centroid, candidate.Embedding)
+				cluster.Centroid = incrementalMean(cluster.Centroid, candidate.Embedding, len(cluster.Memories))
 			}
 		}
 
@@ -888,8 +917,11 @@ func (s *ConsolidationService) mergeRedundantMemories(ctx context.Context, _, _ 
 				if newConfidence > 0.99 {
 					newConfidence = 0.99
 				}
-				_ = s.memoryStore.UpdateReinforcement(ctx, memories[keepIdx].ID, newConfidence,
-					memories[keepIdx].ReinforcementCount+1)
+				newCount := memories[keepIdx].ReinforcementCount + 1
+				_ = s.memoryStore.UpdateReinforcement(ctx, memories[keepIdx].ID, newConfidence, newCount)
+
+				memories[keepIdx].Confidence = newConfidence
+				memories[keepIdx].ReinforcementCount = newCount
 
 				// Archive the redundant one
 				_ = s.memoryStore.Archive(ctx, memories[archiveIdx].ID)
@@ -987,8 +1019,9 @@ func (s *ConsolidationService) GetMemoryHealth(ctx context.Context, agentID uuid
 
 	// Count contradictions
 	if s.contradictionStore != nil {
-		// Would need a count method in the store
-		stats.ContradictionCount = 0
+		if n, err := s.contradictionStore.CountByAgent(ctx, agentID, tenantID); err == nil {
+			stats.ContradictionCount = n
+		}
 	}
 
 	return stats, nil

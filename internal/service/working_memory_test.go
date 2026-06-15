@@ -115,16 +115,16 @@ func (m *MockMemoryAssociationStore) Create(ctx context.Context, a *domain.Memor
 	return args.Error(0)
 }
 
-func (m *MockMemoryAssociationStore) GetBySource(ctx context.Context, sourceType domain.ActivatedMemoryType, sourceID uuid.UUID) ([]domain.MemoryAssociation, error) {
-	args := m.Called(ctx, sourceType, sourceID)
+func (m *MockMemoryAssociationStore) GetBySource(ctx context.Context, tenantID uuid.UUID, sourceType domain.ActivatedMemoryType, sourceID uuid.UUID) ([]domain.MemoryAssociation, error) {
+	args := m.Called(ctx, tenantID, sourceType, sourceID)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
 	return args.Get(0).([]domain.MemoryAssociation), args.Error(1)
 }
 
-func (m *MockMemoryAssociationStore) GetByTarget(ctx context.Context, targetType domain.ActivatedMemoryType, targetID uuid.UUID) ([]domain.MemoryAssociation, error) {
-	args := m.Called(ctx, targetType, targetID)
+func (m *MockMemoryAssociationStore) GetByTarget(ctx context.Context, tenantID uuid.UUID, targetType domain.ActivatedMemoryType, targetID uuid.UUID) ([]domain.MemoryAssociation, error) {
+	args := m.Called(ctx, tenantID, targetType, targetID)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}

@@ -15,22 +15,22 @@ import (
 // Metacognition constants
 const (
 	// Confidence assessment
-	RecencyDecayDays          = 30.0 // Days for recency factor to decay
-	MaxReinforcementBonus     = 0.5  // Maximum bonus from reinforcement
-	ContradictionPenaltyPer   = 0.1  // Penalty per contradiction
-	MinAdjustedConfidence     = 0.05 // Floor for adjusted confidence
-	MaxAdjustedConfidence     = 1.0  // Ceiling for adjusted confidence
+	RecencyDecayDays        = 30.0 // Days for recency factor to decay
+	MaxReinforcementBonus   = 0.5  // Maximum bonus from reinforcement
+	ContradictionPenaltyPer = 0.1  // Penalty per contradiction
+	MinAdjustedConfidence   = 0.05 // Floor for adjusted confidence
+	MaxAdjustedConfidence   = 1.0  // Ceiling for adjusted confidence
 
 	// Uncertainty thresholds
-	LowConfidenceThreshold    = 0.6  // Below this is considered low confidence
-	StaleMemoryDays           = 30   // Days since verification to be considered stale
-	HighUncertaintyLevel      = 0.7  // Overall uncertainty level considered high
+	LowConfidenceThreshold = 0.6 // Below this is considered low confidence
+	StaleMemoryDays        = 30  // Days since verification to be considered stale
+	HighUncertaintyLevel   = 0.7 // Overall uncertainty level considered high
 
 	// Strategy reflection
-	MinProcedureUsesForEval   = 5    // Minimum uses before evaluating effectiveness
-	LowSuccessRateThreshold   = 0.5  // Below this is underperforming
-	HighSuccessRateThreshold  = 0.8  // Above this is highly effective
-	RecentFailureLookbackDays = 30   // Days to look back for failure pattern analysis
+	MinProcedureUsesForEval   = 5   // Minimum uses before evaluating effectiveness
+	LowSuccessRateThreshold   = 0.5 // Below this is underperforming
+	HighSuccessRateThreshold  = 0.8 // Above this is highly effective
+	RecentFailureLookbackDays = 30  // Days to look back for failure pattern analysis
 
 	// Source reliability
 	SourceReliabilityUserStatement  = 1.0
@@ -53,12 +53,12 @@ type ConfidenceAssessment struct {
 
 // UncertaintyReport contains areas of uncertainty for an agent.
 type UncertaintyReport struct {
-	Topic               string          `json:"topic,omitempty"`
-	UncertaintyLevel    float32         `json:"uncertainty_level"` // 0-1, higher = more uncertain
-	ContradictedBeliefs []domain.Memory `json:"contradicted_beliefs,omitempty"`
+	Topic                string          `json:"topic,omitempty"`
+	UncertaintyLevel     float32         `json:"uncertainty_level"` // 0-1, higher = more uncertain
+	ContradictedBeliefs  []domain.Memory `json:"contradicted_beliefs,omitempty"`
 	LowConfidenceBeliefs []domain.Memory `json:"low_confidence_beliefs,omitempty"`
-	StaleBeliefs        []domain.Memory `json:"stale_beliefs,omitempty"`
-	Recommendation      string          `json:"recommendation"`
+	StaleBeliefs         []domain.Memory `json:"stale_beliefs,omitempty"`
+	Recommendation       string          `json:"recommendation"`
 }
 
 // ProcedureAssessment contains the assessment of a procedure's effectiveness.
@@ -70,10 +70,10 @@ type ProcedureAssessment struct {
 
 // FailurePattern represents a common pattern found in failed episodes.
 type FailurePattern struct {
-	Pattern     string   `json:"pattern"`
-	Frequency   int      `json:"frequency"`
-	Topics      []string `json:"topics,omitempty"`
-	Suggestion  string   `json:"suggestion"`
+	Pattern    string   `json:"pattern"`
+	Frequency  int      `json:"frequency"`
+	Topics     []string `json:"topics,omitempty"`
+	Suggestion string   `json:"suggestion"`
 }
 
 // StrategyReflection contains the reflection on agent strategies.
@@ -159,11 +159,21 @@ func (s *MetacognitiveService) AssessConfidence(ctx context.Context, memory doma
 	sourceFactor := s.assessSourceReliability(memory.Source)
 	assessment.Factors["source"] = sourceFactor
 
-	// Combined assessment
-	// Formula: base * recency * (1 + reinforcement) * source - contradiction_penalty
-	adjusted := memory.Confidence * recencyFactor * (1 + reinforcementFactor) * sourceFactor - contradictionPenalty
+	// Combined assessment in log-odds space (consistent with the confidence
+	// engine). The previous multiplicative formula
+	//   base * recency * (1+reinforcement) * source - penalty
+	// saturated: with reinforcement up to 1.5x, any base >= ~0.67 hit the 1.0
+	// ceiling and lost all resolution at the top. Working in log-odds keeps the
+	// result a proper probability in (0,1) that stays monotonic in the base and
+	// never artificially pegs at 1.0.
+	logOdds := Logit(float64(memory.Confidence))
+	logOdds += float64(reinforcementFactor)                     // 0..MaxReinforcementBonus, positive boost
+	logOdds += math.Log(math.Max(float64(recencyFactor), 0.02)) // staleness penalty (<=0)
+	logOdds += math.Log(float64(sourceFactor))                  // source reliability (<=0; user-statement = 0)
+	logOdds -= float64(contradictionPenalty)                    // per-contradiction penalty
+	adjusted := float32(Sigmoid(logOdds))
 
-	// Clamp to valid range
+	// Safety clamp (sigmoid is already open on (0,1)).
 	if adjusted < MinAdjustedConfidence {
 		adjusted = MinAdjustedConfidence
 	}
@@ -259,10 +269,10 @@ func (s *MetacognitiveService) generateConfidenceExplanation(assessment *Confide
 // DetectUncertainty identifies areas where the agent should be uncertain.
 func (s *MetacognitiveService) DetectUncertainty(ctx context.Context, agentID, tenantID uuid.UUID, topic string) (*UncertaintyReport, error) {
 	report := &UncertaintyReport{
-		Topic:               topic,
-		ContradictedBeliefs: []domain.Memory{},
+		Topic:                topic,
+		ContradictedBeliefs:  []domain.Memory{},
 		LowConfidenceBeliefs: []domain.Memory{},
-		StaleBeliefs:        []domain.Memory{},
+		StaleBeliefs:         []domain.Memory{},
 	}
 
 	// Get relevant memories

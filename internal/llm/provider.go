@@ -35,7 +35,7 @@ const (
 	ProviderGemini    = "gemini"
 	ProviderCerebras  = "cerebras"
 	ProviderMock      = "mock"
-	ProviderNone = "none"
+	ProviderNone      = "none"
 )
 
 // NewClient creates an LLM client based on the provider name.

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -201,7 +202,19 @@ func (m *mockMemoryStoreForSchema) UpdateReinforcement(ctx context.Context, id u
 	return nil
 }
 
+func (m *mockMemoryStoreForSchema) UpdateContent(ctx context.Context, id uuid.UUID, content string, embedding []float32) error {
+	return nil
+}
+
+func (m *mockMemoryStoreForSchema) RedactContent(ctx context.Context, id uuid.UUID, tombstone string) error {
+	return nil
+}
+
 func (m *mockMemoryStoreForSchema) UpdateConfidence(ctx context.Context, id uuid.UUID, confidence float32) error {
+	return nil
+}
+
+func (m *mockMemoryStoreForSchema) ApplyConfidenceDelta(ctx context.Context, id uuid.UUID, delta float32) error {
 	return nil
 }
 
@@ -223,7 +236,14 @@ func (m *mockMemoryStoreForSchema) Archive(ctx context.Context, id uuid.UUID) er
 	return nil
 }
 
-func (m *mockMemoryStoreForSchema) Restore(ctx context.Context, id uuid.UUID) error {
+func (m *mockMemoryStoreForSchema) Restore(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error {
+	return nil
+}
+
+func (m *mockMemoryStoreForSchema) ListQuarantined(ctx context.Context, agentID, tenantID uuid.UUID, limit, offset int) ([]domain.Memory, int, error) {
+	return nil, 0, nil
+}
+func (m *mockMemoryStoreForSchema) ReleaseQuarantine(ctx context.Context, id, tenantID uuid.UUID, newBinding domain.MemoryBinding) error {
 	return nil
 }
 
@@ -253,6 +273,10 @@ func (m *mockMemoryStoreForSchema) ArchiveExpiredSessionMemories(ctx context.Con
 
 func (m *mockMemoryStoreForSchema) PromoteSessionToAnchor(ctx context.Context, id uuid.UUID) (bool, error) {
 	return false, nil
+}
+
+func (m *mockMemoryStoreForSchema) CountNeedsReview(ctx context.Context, agentID, tenantID uuid.UUID) (int, error) {
+	return 0, nil
 }
 
 func (m *mockMemoryStoreForSchema) GetNeedsReview(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, limit int) ([]domain.Memory, error) {
@@ -693,5 +717,48 @@ func TestScoreTimeMatch(t *testing.T) {
 	score = svc.scoreTimeMatch(attributes, "")
 	if score != 0 {
 		t.Fatalf("expected score 0 for empty time_of_day, got %f", score)
+	}
+}
+
+func (m *mockMemoryStoreForSchema) ListByAgentFiltered(ctx context.Context, agentID, tenantID uuid.UUID, f domain.MemoryFilter, limit, offset int) ([]domain.Memory, int, error) {
+	return nil, 0, nil
+}
+
+func (m *mockMemoryStoreForSchema) BeliefsAsOf(ctx context.Context, agentID, tenantID uuid.UUID, at time.Time, limit int) ([]domain.BeliefAtTime, int, error) {
+	return nil, 0, nil
+}
+
+// TestIncrementalMean_EqualWeighting proves the consolidation centroid fix:
+// folding members in one at a time must produce the true equal-weight mean,
+// not a pairwise average that over-weights the last-added member.
+func TestIncrementalMean_EqualWeighting(t *testing.T) {
+	vecs := [][]float32{
+		{0, 0, 0},
+		{3, 6, 9},
+		{6, 6, 6},
+	}
+	// build centroid incrementally the way clusterMemories does
+	centroid := cloneVector(vecs[0])
+	for n := 1; n < len(vecs); n++ {
+		centroid = incrementalMean(centroid, vecs[n], n+1)
+	}
+	want := []float32{3, 4, 5}
+	for i := range want {
+		if math.Abs(float64(centroid[i]-want[i])) > 1e-5 {
+			t.Fatalf("centroid[%d]=%f, want %f (equal weighting violated)", i, centroid[i], want[i])
+		}
+	}
+}
+
+// TestIncrementalMean_DoesNotMutateSeed guards the aliasing fix: the seed
+// embedding must not change when it is used to start a cluster centroid.
+func TestIncrementalMean_DoesNotMutateSeed(t *testing.T) {
+	seed := []float32{1, 2, 3}
+	centroid := cloneVector(seed)
+	_ = incrementalMean(centroid, []float32{9, 9, 9}, 2)
+	for i, v := range []float32{1, 2, 3} {
+		if seed[i] != v {
+			t.Fatalf("seed mutated at %d: got %f want %f", i, seed[i], v)
+		}
 	}
 }

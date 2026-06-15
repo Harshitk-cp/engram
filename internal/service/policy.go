@@ -18,22 +18,22 @@ var (
 )
 
 type PolicyService struct {
-	policyStore  domain.PolicyStore
-	memoryStore  domain.MemoryStore
-	agentStore   domain.AgentStore
-	llmClient    domain.LLMClient
-	embClient    domain.EmbeddingClient
-	logger       *zap.Logger
+	policyStore domain.PolicyStore
+	memoryStore domain.MemoryStore
+	agentStore  domain.AgentStore
+	llmClient   domain.LLMClient
+	embClient   domain.EmbeddingClient
+	logger      *zap.Logger
 }
 
 func NewPolicyService(ps domain.PolicyStore, ms domain.MemoryStore, as domain.AgentStore, lc domain.LLMClient, ec domain.EmbeddingClient, logger *zap.Logger) *PolicyService {
 	return &PolicyService{
-		policyStore:  ps,
-		memoryStore:  ms,
-		agentStore:   as,
-		llmClient:    lc,
-		embClient:    ec,
-		logger:       logger,
+		policyStore: ps,
+		memoryStore: ms,
+		agentStore:  as,
+		llmClient:   lc,
+		embClient:   ec,
+		logger:      logger,
 	}
 }
 

@@ -14,10 +14,10 @@ import (
 
 // Client is an HTTP client for the Engram API.
 type Client struct {
-	baseURL  string
-	apiKey   string
-	agentID  string
-	http     *http.Client
+	baseURL string
+	apiKey  string
+	agentID string
+	http    *http.Client
 }
 
 // NewClient creates an Engram API client.
@@ -35,13 +35,15 @@ func (c *Client) AgentID() string { return c.agentID }
 
 // MemoryResult is returned by Remember.
 type MemoryResult struct {
-	ID         string  `json:"id"`
-	Content    string  `json:"content"`
-	Type       string  `json:"type"`
-	Confidence float64 `json:"confidence"`
-	Tier       string  `json:"tier"`
-	TierReason string  `json:"tier_reason"`
-	Reinforced bool    `json:"reinforced"`
+	ID               string  `json:"id"`
+	Content          string  `json:"content"`
+	Type             string  `json:"type"`
+	Confidence       float64 `json:"confidence"`
+	Tier             string  `json:"tier"`
+	TierReason       string  `json:"tier_reason"`
+	Reinforced       bool    `json:"reinforced"`
+	Quarantined      bool    `json:"quarantined"`
+	QuarantineReason string  `json:"quarantine_reason"`
 }
 
 // RecallMemory is a single memory in a recall result.
@@ -65,7 +67,7 @@ type AgentResult struct {
 // Remember stores a memory in Engram. confidence=0 lets the server assign the
 // default. anchor is the caller's own id for who/what the memory is about; when
 // set, the trace is bound to that anchor (which must already exist).
-func (c *Client) Remember(ctx context.Context, agentID, content, memType, source, anchor, session string, confidence float32) (*MemoryResult, error) {
+func (c *Client) Remember(ctx context.Context, agentID, content, memType, source, anchor, session string, confidence float32, quarantine bool) (*MemoryResult, error) {
 	if agentID == "" {
 		agentID = c.agentID
 	}
@@ -73,6 +75,14 @@ func (c *Client) Remember(ctx context.Context, agentID, content, memType, source
 		"agent_id": agentID,
 		"content":  content,
 		"source":   source,
+	}
+	if quarantine {
+		body["quarantine"] = true
+	}
+	// `source` carries the belief's origin (user/agent/inferred/tool); send it as
+	// provenance too so the server records it and derives the initial confidence.
+	if source != "" {
+		body["provenance"] = source
 	}
 	if memType != "" {
 		body["type"] = memType
@@ -182,6 +192,66 @@ func (c *Client) GetHotMemories(ctx context.Context, agentID string, limit int) 
 		return nil, err
 	}
 	return resp.Memories, nil
+}
+
+// ResolveAgent returns the given agent id or the client default if empty.
+func (c *Client) ResolveAgent(agentID string) string {
+	if agentID == "" {
+		return c.agentID
+	}
+	return agentID
+}
+
+// GetRaw performs a GET and returns the raw JSON body. Used by the broader tool
+// surface where a typed struct adds no value over passing the structured result
+// straight back to the model.
+func (c *Client) GetRaw(ctx context.Context, path string) (json.RawMessage, error) {
+	return c.doRaw(ctx, http.MethodGet, path, nil)
+}
+
+// PostRaw performs a POST with a JSON body and returns the raw JSON response.
+func (c *Client) PostRaw(ctx context.Context, path string, body interface{}) (json.RawMessage, error) {
+	return c.doRaw(ctx, http.MethodPost, path, body)
+}
+
+// DeleteRaw performs a DELETE and returns the raw JSON response (if any).
+func (c *Client) DeleteRaw(ctx context.Context, path string) (json.RawMessage, error) {
+	return c.doRaw(ctx, http.MethodDelete, path, nil)
+}
+
+func (c *Client) doRaw(ctx context.Context, method, path string, body interface{}) (json.RawMessage, error) {
+	var reader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return nil, err
+		}
+		reader = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, reader)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("engram API: %w", err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("engram API: status %d: %s", resp.StatusCode, respBody)
+	}
+	if len(bytes.TrimSpace(respBody)) == 0 {
+		return json.RawMessage(`{"ok":true}`), nil
+	}
+	return json.RawMessage(respBody), nil
 }
 
 func (c *Client) post(ctx context.Context, path string, body interface{}, result interface{}) error {

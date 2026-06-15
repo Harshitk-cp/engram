@@ -70,16 +70,16 @@ func TestDecay_DistanceToFloor(t *testing.T) {
 	agentID := uuid.New()
 
 	tests := []struct {
-		name           string
-		initialConf    float32
-		hoursAgo       float64
-		wantMinConf    float32 
-		wantMaxConf    float32 
+		name        string
+		initialConf float32
+		hoursAgo    float64
+		wantMinConf float32
+		wantMaxConf float32
 	}{
 		{
 			name:        "high confidence decays toward floor",
 			initialConf: 0.9,
-			hoursAgo:    168, 
+			hoursAgo:    168,
 			wantMinConf: 0.5,
 			wantMaxConf: 0.85,
 		},
@@ -126,7 +126,7 @@ func TestDecay_ReinforcementBonus(t *testing.T) {
 	svc := NewDecayService(store, nil, logger)
 
 	agentID := uuid.New()
-	hoursAgo := 168.0 
+	hoursAgo := 168.0
 
 	// Test that reinforcement slows decay
 	memNoReinforcement := createTestMemory(agentID, 0.8, hoursAgo, 0, domain.MemoryTypeFact)
@@ -250,9 +250,9 @@ func TestDecay_BatchDecay(t *testing.T) {
 
 	// Create several memories with different confidences
 	memories := []*domain.Memory{
-		createTestMemory(agentID, 0.9, 72, 5, domain.MemoryTypeFact),    // High conf, reinforced
-		createTestMemory(agentID, 0.5, 168, 0, domain.MemoryTypeFact),   // Medium conf, no reinforcement
-		createTestMemory(agentID, 0.12, 240, 0, domain.MemoryTypeFact),  // Low conf, should be archived
+		createTestMemory(agentID, 0.9, 72, 5, domain.MemoryTypeFact),        // High conf, reinforced
+		createTestMemory(agentID, 0.5, 168, 0, domain.MemoryTypeFact),       // Medium conf, no reinforcement
+		createTestMemory(agentID, 0.12, 240, 0, domain.MemoryTypeFact),      // Low conf, should be archived
 		createTestMemory(agentID, 0.8, 0.5, 0, domain.MemoryTypePreference), // Recent, no decay
 	}
 
@@ -293,9 +293,11 @@ func TestDecay_TierTransitions(t *testing.T) {
 	agentID := uuid.New()
 	tenantID := uuid.New()
 
-	// Create a memory that will transition from HOT to WARM
-	// Start at 0.86 (just above HOT threshold), decay for long enough to cross 0.85
-	mem := createTestMemory(agentID, 0.86, 500, 0, domain.MemoryTypeFact)
+	// Create a memory that starts just above the HOT threshold (0.86) and is
+	// unreinforced, then leave it un-accessed long enough that exp(-λ·t) drives
+	// it to the floor — well below 0.85 — so the HOT→(lower tier) transition is
+	// deterministic rather than a coin flip we'd otherwise have to t.Skip on.
+	mem := createTestMemory(agentID, 0.86, 100000, 0, domain.MemoryTypeFact)
 	mem.TenantID = tenantID
 	store.memories[mem.ID] = mem
 
@@ -305,7 +307,7 @@ func TestDecay_TierTransitions(t *testing.T) {
 	}
 
 	if len(result.TierTransitions) == 0 {
-		t.Skip("Memory may not have decayed enough for tier transition")
+		t.Fatalf("expected a tier transition after heavy decay, got none (new confidence did not cross a tier boundary)")
 	}
 
 	transition := result.TierTransitions[0]
@@ -389,7 +391,7 @@ func TestDecay_CompetitionFactorFormula(t *testing.T) {
 		t.Fatalf("Expected 1 competitor, got %d", len(competitors))
 	}
 
-	factor := svc.calculateCompetition(mem, competitors)
+	factor := svc.calculateCompetition(mem, competitors, svc.CompetitionWeight)
 
 	// Expected: (0.9 - 0.5) * 1.0 / (1 + 0.5) * 0.5 = 0.4 / 1.5 * 0.5 ≈ 0.133
 	expectedFactor := 0.4 / 1.5 * svc.CompetitionWeight

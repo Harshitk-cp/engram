@@ -126,6 +126,14 @@ func (m *mockMemoryStore) UpdateReinforcement(ctx context.Context, id uuid.UUID,
 	return nil
 }
 
+func (m *mockMemoryStore) UpdateContent(ctx context.Context, id uuid.UUID, content string, embedding []float32) error {
+	return nil
+}
+
+func (m *mockMemoryStore) RedactContent(ctx context.Context, id uuid.UUID, tombstone string) error {
+	return nil
+}
+
 func (m *mockMemoryStore) UpdateConfidence(ctx context.Context, id uuid.UUID, confidence float32) error {
 	mem, ok := m.memories[id]
 	if !ok {
@@ -133,6 +141,26 @@ func (m *mockMemoryStore) UpdateConfidence(ctx context.Context, id uuid.UUID, co
 	}
 	mem.Confidence = confidence
 	return nil
+}
+
+func (m *mockMemoryStore) ApplyConfidenceDelta(ctx context.Context, id uuid.UUID, delta float32) error {
+	mem, ok := m.memories[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	mem.Confidence = clampConf(mem.Confidence + delta)
+	return nil
+}
+
+// clampConf mirrors the store's ApplyConfidenceDelta clamp ([0, 0.99]) for mocks.
+func clampConf(v float32) float32 {
+	if v < 0 {
+		return 0
+	}
+	if v > 0.99 {
+		return 0.99
+	}
+	return v
 }
 
 func (m *mockMemoryStore) ListDistinctAgentIDs(ctx context.Context) ([]uuid.UUID, error) {
@@ -162,7 +190,7 @@ func (m *mockMemoryStore) Archive(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-func (m *mockMemoryStore) Restore(ctx context.Context, id uuid.UUID) error {
+func (m *mockMemoryStore) Restore(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error {
 	if _, ok := m.memories[id]; !ok {
 		return store.ErrNotFound
 	}
@@ -175,6 +203,27 @@ func (m *mockMemoryStore) GetByIDOnly(ctx context.Context, id uuid.UUID) (*domai
 		return nil, store.ErrNotFound
 	}
 	return mem, nil
+}
+
+func (m *mockMemoryStore) ListQuarantined(ctx context.Context, agentID, tenantID uuid.UUID, limit, offset int) ([]domain.Memory, int, error) {
+	var out []domain.Memory
+	for _, mem := range m.memories {
+		if mem.AgentID == agentID && mem.TenantID == tenantID && mem.Binding == domain.BindingQuarantine {
+			out = append(out, *mem)
+		}
+	}
+	return out, len(out), nil
+}
+
+func (m *mockMemoryStore) ReleaseQuarantine(ctx context.Context, id, tenantID uuid.UUID, newBinding domain.MemoryBinding) error {
+	mem, ok := m.memories[id]
+	if !ok || mem.Binding != domain.BindingQuarantine {
+		return store.ErrNotFound
+	}
+	mem.Binding = newBinding
+	mem.QuarantineReason = ""
+	mem.QuarantinedAt = nil
+	return nil
 }
 
 func (m *mockMemoryStore) IncrementAccessAndBoost(ctx context.Context, id uuid.UUID, boost float32) error {
@@ -233,6 +282,10 @@ func (m *mockMemoryStore) ArchiveExpiredSessionMemories(ctx context.Context) (in
 
 func (m *mockMemoryStore) PromoteSessionToAnchor(ctx context.Context, id uuid.UUID) (bool, error) {
 	return false, nil
+}
+
+func (m *mockMemoryStore) CountNeedsReview(ctx context.Context, agentID, tenantID uuid.UUID) (int, error) {
+	return 0, nil
 }
 
 func (m *mockMemoryStore) GetNeedsReview(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, limit int) ([]domain.Memory, error) {
@@ -379,8 +432,13 @@ func TestMemoryService_Create(t *testing.T) {
 	if mem.ID == uuid.Nil {
 		t.Fatal("expected memory ID to be set")
 	}
-	if mem.Confidence != 1.0 {
-		t.Fatalf("expected default confidence 1.0, got %f", mem.Confidence)
+	// No provenance or confidence supplied → provenance defaults to "agent" and
+	// confidence is derived from it (0.6), not the engine ceiling.
+	if mem.Provenance != domain.ProvenanceAgent {
+		t.Fatalf("expected provenance to default to agent, got %q", mem.Provenance)
+	}
+	if want := domain.ProvenanceAgent.InitialConfidence(); mem.Confidence != want {
+		t.Fatalf("expected provenance-derived confidence %v, got %f", want, mem.Confidence)
 	}
 	if len(mem.Embedding) != 1536 {
 		t.Fatalf("expected embedding of length 1536, got %d", len(mem.Embedding))
@@ -428,6 +486,91 @@ func TestMemoryService_Create_DefaultType_NoLLM(t *testing.T) {
 	}
 	if mem.Type != domain.MemoryTypeFact {
 		t.Fatalf("expected default type 'fact' without LLM, got %s", mem.Type)
+	}
+}
+
+// fixedSettings is a TenantSettingsStore that always returns the same settings.
+type fixedSettings struct{ s domain.EngineSettings }
+
+func (f fixedSettings) Get(ctx context.Context, tenantID uuid.UUID) (domain.EngineSettings, error) {
+	return f.s, nil
+}
+func (f fixedSettings) Upsert(ctx context.Context, tenantID uuid.UUID, s domain.EngineSettings) error {
+	return nil
+}
+
+func TestProvenanceFirewall_QuarantineReleaseReject(t *testing.T) {
+	ctx := context.Background()
+	tenantID := uuid.New()
+	agentStore := newMockAgentStore()
+	memStore := newMockMemoryStore()
+	agent := &domain.Agent{TenantID: tenantID, ExternalID: "bot-1", Name: "Bot"}
+	_ = agentStore.Create(ctx, agent)
+
+	svc := NewMemoryService(memStore, agentStore, nil, nil, testLogger())
+	fw := domain.DefaultEngineSettings()
+	fw.FirewallEnabled = true
+	fw.QuarantineProvenances = []string{"inferred"}
+	svc.SetSettingsStore(fixedSettings{s: fw})
+
+	// 1. A trusted (user) write is admitted normally.
+	trusted := &domain.Memory{AgentID: agent.ID, TenantID: tenantID, Content: "user said X", Provenance: domain.ProvenanceUser}
+	res, err := svc.Create(ctx, trusted)
+	if err != nil {
+		t.Fatalf("trusted create: %v", err)
+	}
+	if res.Quarantined {
+		t.Fatal("trusted write should not be quarantined")
+	}
+
+	// 2. An untrusted (inferred) write is held by the firewall.
+	untrusted := &domain.Memory{AgentID: agent.ID, TenantID: tenantID, Content: "model guessed Y", Provenance: domain.ProvenanceInferred}
+	res, err = svc.Create(ctx, untrusted)
+	if err != nil {
+		t.Fatalf("untrusted create: %v", err)
+	}
+	if !res.Quarantined {
+		t.Fatal("inferred write should be quarantined by policy")
+	}
+	if untrusted.Binding != domain.BindingQuarantine {
+		t.Fatalf("binding = %q, want quarantine", untrusted.Binding)
+	}
+
+	// 3. The explicit flag quarantines even a trusted provenance.
+	flagged := &domain.Memory{AgentID: agent.ID, TenantID: tenantID, Content: "scraped Z", Provenance: domain.ProvenanceUser, Quarantine: true}
+	res, _ = svc.Create(ctx, flagged)
+	if !res.Quarantined {
+		t.Fatal("explicit quarantine flag must hold the write")
+	}
+
+	// Review queue has the two quarantined writes.
+	items, total, err := svc.ListQuarantine(ctx, agent.ID, tenantID, 50, 0)
+	if err != nil {
+		t.Fatalf("list quarantine: %v", err)
+	}
+	if total != 2 || len(items) != 2 {
+		t.Fatalf("quarantine queue = %d, want 2", total)
+	}
+
+	// 4. Release one → it leaves the queue with a real binding.
+	if _, err := svc.ReleaseQuarantine(ctx, untrusted.ID, tenantID, "reviewed"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	if _, total, _ := svc.ListQuarantine(ctx, agent.ID, tenantID, 50, 0); total != 1 {
+		t.Fatalf("after release queue = %d, want 1", total)
+	}
+
+	// 5. Reject the other → deleted from the queue.
+	if err := svc.RejectQuarantine(ctx, flagged.ID, tenantID, "spam"); err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	if _, total, _ := svc.ListQuarantine(ctx, agent.ID, tenantID, 50, 0); total != 0 {
+		t.Fatalf("after reject queue = %d, want 0", total)
+	}
+
+	// Releasing a non-quarantined memory is rejected.
+	if _, err := svc.ReleaseQuarantine(ctx, trusted.ID, tenantID, ""); err != ErrNotQuarantined {
+		t.Fatalf("release of active memory: got %v, want ErrNotQuarantined", err)
 	}
 }
 
@@ -652,4 +795,12 @@ func TestMemoryService_Summarize(t *testing.T) {
 	if summary == "" {
 		t.Fatal("expected non-empty summary")
 	}
+}
+
+func (m *mockMemoryStore) ListByAgentFiltered(ctx context.Context, agentID, tenantID uuid.UUID, f domain.MemoryFilter, limit, offset int) ([]domain.Memory, int, error) {
+	return nil, 0, nil
+}
+
+func (m *mockMemoryStore) BeliefsAsOf(ctx context.Context, agentID, tenantID uuid.UUID, at time.Time, limit int) ([]domain.BeliefAtTime, int, error) {
+	return nil, 0, nil
 }

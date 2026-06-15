@@ -421,7 +421,8 @@ func (s *EpisodeStore) GetByAgentForDecay(ctx context.Context, agentID uuid.UUID
 			memory_strength, last_accessed_at, access_count, decay_rate,
 			created_at, updated_at
 		FROM episodes WHERE agent_id = $1 AND consolidation_status != 'archived'
-		ORDER BY last_accessed_at ASC`,
+		ORDER BY last_accessed_at ASC
+		LIMIT 10000`,
 		agentID,
 	)
 	if err != nil {
@@ -497,10 +498,10 @@ func (s *EpisodeStore) RecordAccess(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-func (s *EpisodeStore) UpdateOutcome(ctx context.Context, id uuid.UUID, outcome domain.OutcomeType, description string) error {
+func (s *EpisodeStore) UpdateOutcome(ctx context.Context, id uuid.UUID, tenantID uuid.UUID, outcome domain.OutcomeType, description string) error {
 	tag, err := s.db.Exec(ctx,
-		`UPDATE episodes SET outcome = $1, outcome_description = $2, updated_at = NOW() WHERE id = $3`,
-		outcome, description, id,
+		`UPDATE episodes SET outcome = $1, outcome_description = $2, updated_at = NOW() WHERE id = $3 AND tenant_id = $4`,
+		outcome, description, id, tenantID,
 	)
 	if err != nil {
 		return err

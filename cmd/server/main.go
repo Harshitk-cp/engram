@@ -10,6 +10,7 @@ import (
 
 	"github.com/Harshitk-cp/engram/internal/api"
 	"github.com/Harshitk-cp/engram/internal/config"
+	"github.com/Harshitk-cp/engram/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 )
@@ -40,6 +41,10 @@ func main() {
 	}
 	logger.Info("connected to database")
 
+	if err := store.EnsureEmbeddingDimension(ctx, pool, config.EmbeddingDim(), logger); err != nil {
+		logger.Fatal("embedding dimension reconciliation failed", zap.Error(err))
+	}
+
 	app := api.NewApp(pool, logger)
 
 	// Start background services
@@ -47,6 +52,7 @@ func main() {
 	app.Expirer.Start()
 	app.Decay.Start()
 	app.Consolidation.Start()
+	app.Learning.Start()
 
 	addr := config.ServerAddr()
 	srv := &http.Server{
@@ -73,6 +79,7 @@ func main() {
 	app.Expirer.Stop()
 	app.Decay.Stop()
 	app.Consolidation.Stop()
+	app.Learning.Stop()
 
 	shutdownCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()

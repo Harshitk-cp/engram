@@ -34,21 +34,21 @@ type matchProceduresResponse struct {
 }
 
 type procedureResponse struct {
-	ID              string                  `json:"id"`
-	TriggerPattern  string                  `json:"trigger_pattern"`
-	TriggerKeywords []string                `json:"trigger_keywords,omitempty"`
-	ActionTemplate  string                  `json:"action_template"`
-	ActionType      string                  `json:"action_type"`
-	UseCount        int                     `json:"use_count"`
-	SuccessCount    int                     `json:"success_count"`
-	FailureCount    int                     `json:"failure_count"`
-	SuccessRate     float32                 `json:"success_rate"`
-	Confidence      float32                 `json:"confidence"`
-	Version         int                     `json:"version"`
-	Score           float32                 `json:"score,omitempty"`
+	ID              string                   `json:"id"`
+	TriggerPattern  string                   `json:"trigger_pattern"`
+	TriggerKeywords []string                 `json:"trigger_keywords,omitempty"`
+	ActionTemplate  string                   `json:"action_template"`
+	ActionType      string                   `json:"action_type"`
+	UseCount        int                      `json:"use_count"`
+	SuccessCount    int                      `json:"success_count"`
+	FailureCount    int                      `json:"failure_count"`
+	SuccessRate     float32                  `json:"success_rate"`
+	Confidence      float32                  `json:"confidence"`
+	Version         int                      `json:"version"`
+	Score           float32                  `json:"score,omitempty"`
 	Examples        []domain.ExampleExchange `json:"examples,omitempty"`
-	CreatedAt       string                  `json:"created_at"`
-	UpdatedAt       string                  `json:"updated_at"`
+	CreatedAt       string                   `json:"created_at"`
+	UpdatedAt       string                   `json:"updated_at"`
 }
 
 // Match finds procedures applicable to the current situation.
@@ -246,4 +246,3 @@ func toProcedureResponse(p *domain.Procedure) procedureResponse {
 
 	return resp
 }
-

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/Harshitk-cp/engram/internal/domain"
@@ -14,9 +15,18 @@ import (
 type contextKey string
 
 const (
-	tenantContextKey  contextKey = "tenant"
-	authContextKey    contextKey = "auth"
+	tenantContextKey contextKey = "tenant"
+	authContextKey   contextKey = "auth"
 )
+
+// SessionCookieName is the console session cookie.
+const SessionCookieName = "engram_session"
+
+// SessionResolver turns a raw session token into a data-plane auth context.
+// Implemented by the control-plane AuthService.
+type SessionResolver interface {
+	ResolveSessionAuth(ctx context.Context, rawToken string) (*domain.APIKeyAuth, error)
+}
 
 func TenantFromContext(ctx context.Context) *domain.Tenant {
 	if a, ok := ctx.Value(authContextKey).(*domain.APIKeyAuth); ok && a != nil {
@@ -67,6 +77,53 @@ func APIKeyAuth(apiKeyStore domain.APIKeyStore) func(http.Handler) http.Handler 
 	}
 }
 
+// SessionOrAPIKey authenticates a request via the console session cookie first,
+// then falls back to a Bearer API key. Both resolve to a *domain.APIKeyAuth in
+// the request context, so all /v1 handlers work for the browser console and for
+// programmatic clients without any per-handler changes.
+func SessionOrAPIKey(apiKeyStore domain.APIKeyStore, resolver SessionResolver, allowedOrigins []string) func(http.Handler) http.Handler {
+	allowAll := len(allowedOrigins) == 1 && allowedOrigins[0] == "*"
+	allowed := make(map[string]bool, len(allowedOrigins))
+	for _, o := range allowedOrigins {
+		allowed[o] = true
+	}
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if resolver != nil {
+				if c, err := r.Cookie(SessionCookieName); err == nil && c.Value != "" {
+					if auth, err := resolver.ResolveSessionAuth(r.Context(), c.Value); err == nil && auth != nil {
+						if isStateChanging(r.Method) && !originAllowed(r, allowed, allowAll) {
+							writeError(w, http.StatusForbidden, "cross-origin request blocked")
+							return
+						}
+						next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey, auth)))
+						return
+					}
+				}
+			}
+
+			authHeader := r.Header.Get("Authorization")
+			if authHeader == "" {
+				writeError(w, http.StatusUnauthorized, "missing authorization")
+				return
+			}
+			parts := strings.SplitN(authHeader, " ", 2)
+			if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
+				writeError(w, http.StatusUnauthorized, "invalid authorization header format")
+				return
+			}
+			auth, err := apiKeyStore.GetAuthByHash(r.Context(), HashAPIKey(parts[1]))
+			if err != nil {
+				writeError(w, http.StatusUnauthorized, "invalid API key")
+				return
+			}
+			go func() { _ = apiKeyStore.UpdateLastUsed(context.Background(), auth.KeyID) }()
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), authContextKey, auth)))
+		})
+	}
+}
+
 // RequireScope returns middleware that rejects requests whose API key lacks the given scope.
 // Keys with the "admin" scope pass all scope checks.
 func RequireScope(scope string) func(http.Handler) http.Handler {
@@ -80,6 +137,53 @@ func RequireScope(scope string) func(http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// RequireWriteForMutations enforces the "write" scope on any state-changing
+// request (POST/PUT/PATCH/DELETE) while leaving safe, read-only methods
+// (GET/HEAD/OPTIONS) open to read-scoped keys.
+func RequireWriteForMutations(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+			next.ServeHTTP(w, r)
+			return
+		}
+		auth := AuthFromContext(r.Context())
+		if auth == nil || !auth.HasScope("write") {
+			writeError(w, http.StatusForbidden, "insufficient scope: write required")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func isStateChanging(method string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions, http.MethodTrace:
+		return false
+	default:
+		return true
+	}
+}
+
+func originAllowed(r *http.Request, allowed map[string]bool, allowAll bool) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		if ref := r.Header.Get("Referer"); ref != "" {
+			if u, err := url.Parse(ref); err == nil && u.Host != "" {
+				origin = u.Scheme + "://" + u.Host
+			}
+		}
+	}
+	if origin == "" {
+		return false
+	}
+	
+	if u, err := url.Parse(origin); err == nil && u.Host == r.Host {
+		return true
+	}
+	return allowAll || allowed[origin]
 }
 
 // HashAPIKey returns the SHA-256 hex digest of the given key.

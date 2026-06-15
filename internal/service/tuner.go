@@ -12,8 +12,8 @@ import (
 
 const (
 	// Thresholds for policy adjustment
-	ignoredThreshold  = 0.7
-	helpfulThreshold  = 0.7
+	ignoredThreshold   = 0.7
+	helpfulThreshold   = 0.7
 	unhelpfulThreshold = 0.7
 
 	// Adjustment amounts
@@ -36,9 +36,10 @@ type TunerService struct {
 	policyStore   domain.PolicyStore
 	logger        *zap.Logger
 
-	interval time.Duration
-	stopCh   chan struct{}
-	wg       sync.WaitGroup
+	interval   time.Duration
+	stopCh     chan struct{}
+	cancelRuns context.CancelFunc
+	wg         sync.WaitGroup
 }
 
 func NewTunerService(fs domain.FeedbackStore, ps domain.PolicyStore, logger *zap.Logger) *TunerService {
@@ -57,6 +58,8 @@ func (s *TunerService) SetInterval(d time.Duration) {
 
 // Start runs the tuner on a periodic schedule in a background goroutine.
 func (s *TunerService) Start() {
+	baseCtx, cancel := context.WithCancel(context.Background())
+	s.cancelRuns = cancel
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -68,11 +71,13 @@ func (s *TunerService) Start() {
 		for {
 			select {
 			case <-ticker.C:
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				if err := s.RunAll(ctx); err != nil {
-					s.logger.Error("policy tuner run failed", zap.Error(err))
-				}
-				cancel()
+				ctx, tickCancel := context.WithTimeout(baseCtx, 30*time.Second)
+				guardPanic(s.logger, "tuner tick", func() {
+					if err := s.RunAll(ctx); err != nil {
+						s.logger.Error("policy tuner run failed", zap.Error(err))
+					}
+				})
+				tickCancel()
 			case <-s.stopCh:
 				s.logger.Info("policy tuner stopped")
 				return
@@ -81,8 +86,11 @@ func (s *TunerService) Start() {
 	}()
 }
 
-// Stop gracefully stops the tuner.
+// Stop gracefully stops the tuner, cancelling any in-flight run.
 func (s *TunerService) Stop() {
+	if s.cancelRuns != nil {
+		s.cancelRuns()
+	}
 	close(s.stopCh)
 	s.wg.Wait()
 }

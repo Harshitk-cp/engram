@@ -1,7 +1,6 @@
 package transports
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -56,17 +55,19 @@ func (s *SSEServer) handleSSE(w http.ResponseWriter, r *http.Request) {
 	s.session[sessionID] = ch
 	s.mu.Unlock()
 
+	// close(ch) must happen under the same lock that guards sends in
+	// handleMessage, otherwise a POST racing a disconnect panics the process
+	// with a send on a closed channel.
 	defer func() {
 		s.mu.Lock()
 		delete(s.session, sessionID)
-		s.mu.Unlock()
 		close(ch)
+		s.mu.Unlock()
 	}()
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	// Send the endpoint URL as the first event so the client knows where to POST.
 	endpoint := fmt.Sprintf("/message?sessionId=%s", sessionID)
@@ -97,12 +98,12 @@ func (s *SSEServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.URL.Query().Get("sessionId")
 
 	var req mcp.Request
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes)).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 
-	resp := s.server.Handle(context.Background(), &req)
+	resp := s.server.Handle(r.Context(), &req)
 	if resp == nil {
 		w.WriteHeader(http.StatusAccepted)
 		return
@@ -114,13 +115,15 @@ func (s *SSEServer) handleMessage(w http.ResponseWriter, r *http.Request) {
 	if sessionID != "" {
 		s.mu.Lock()
 		ch, ok := s.session[sessionID]
-		s.mu.Unlock()
-
 		if ok {
 			select {
 			case ch <- data:
 			default: // drop if the channel is full
 			}
+		}
+		s.mu.Unlock()
+
+		if ok {
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}

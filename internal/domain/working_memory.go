@@ -36,9 +36,9 @@ type WorkingMemorySession struct {
 	TenantID uuid.UUID `json:"tenant_id"`
 
 	// Current state
-	CurrentGoal    string           `json:"current_goal,omitempty"`
-	ActiveContext  []Message        `json:"active_context,omitempty"`  // Recent messages
-	ReasoningState map[string]any   `json:"reasoning_state,omitempty"` // Partial conclusions
+	CurrentGoal    string         `json:"current_goal,omitempty"`
+	ActiveContext  []Message      `json:"active_context,omitempty"`  // Recent messages
+	ReasoningState map[string]any `json:"reasoning_state,omitempty"` // Partial conclusions
 
 	// Capacity
 	MaxSlots int `json:"max_slots"` // Default: 7 (Miller's Law)
@@ -49,8 +49,8 @@ type WorkingMemorySession struct {
 	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
 
 	// Loaded activations (populated by service)
-	Activations     []WorkingMemoryActivation `json:"activations,omitempty"`
-	ActiveSchemas   []SchemaActivation        `json:"active_schemas,omitempty"`
+	Activations   []WorkingMemoryActivation `json:"activations,omitempty"`
+	ActiveSchemas []SchemaActivation        `json:"active_schemas,omitempty"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -60,14 +60,15 @@ type WorkingMemorySession struct {
 type WorkingMemoryActivation struct {
 	ID        uuid.UUID `json:"id"`
 	SessionID uuid.UUID `json:"session_id"`
+	TenantID  uuid.UUID `json:"tenant_id,omitempty"`
 
 	// What's activated
 	MemoryType ActivatedMemoryType `json:"memory_type"`
 	MemoryID   uuid.UUID           `json:"memory_id"`
 
 	// Activation details
-	ActivationLevel  float32          `json:"activation_level"`  // 0-1 activation strength
-	ActivationSource ActivationSource `json:"activation_source"` // How it was activated
+	ActivationLevel  float32          `json:"activation_level"`         // 0-1 activation strength
+	ActivationSource ActivationSource `json:"activation_source"`        // How it was activated
 	ActivationCue    string           `json:"activation_cue,omitempty"` // What triggered it
 
 	// Competition
@@ -76,7 +77,7 @@ type WorkingMemoryActivation struct {
 	ActivatedAt time.Time `json:"activated_at"`
 
 	// Populated by service (not stored)
-	Content         string  `json:"content,omitempty"`
+	Content          string  `json:"content,omitempty"`
 	MemoryConfidence float32 `json:"memory_confidence,omitempty"`
 }
 
@@ -95,14 +96,15 @@ type SchemaActivation struct {
 
 // MemoryAssociation links memories of different types for spreading activation.
 type MemoryAssociation struct {
-	ID                uuid.UUID           `json:"id"`
-	SourceMemoryType  ActivatedMemoryType `json:"source_memory_type"`
-	SourceMemoryID    uuid.UUID           `json:"source_memory_id"`
-	TargetMemoryType  ActivatedMemoryType `json:"target_memory_type"`
-	TargetMemoryID    uuid.UUID           `json:"target_memory_id"`
-	AssociationType   string              `json:"association_type"` // derived, thematic, causal, temporal, entity
-	AssociationStrength float32           `json:"association_strength"`
-	CreatedAt         time.Time           `json:"created_at"`
+	ID                  uuid.UUID           `json:"id"`
+	TenantID            uuid.UUID           `json:"tenant_id,omitempty"`
+	SourceMemoryType    ActivatedMemoryType `json:"source_memory_type"`
+	SourceMemoryID      uuid.UUID           `json:"source_memory_id"`
+	TargetMemoryType    ActivatedMemoryType `json:"target_memory_type"`
+	TargetMemoryID      uuid.UUID           `json:"target_memory_id"`
+	AssociationType     string              `json:"association_type"` // derived, thematic, causal, temporal, entity
+	AssociationStrength float32             `json:"association_strength"`
+	CreatedAt           time.Time           `json:"created_at"`
 }
 
 // AssociationType constants
@@ -118,9 +120,9 @@ const (
 type ActivationInput struct {
 	AgentID  uuid.UUID `json:"agent_id"`
 	TenantID uuid.UUID `json:"tenant_id"`
-	Goal     string    `json:"goal,omitempty"`     // Current task goal
-	Cues     []string  `json:"cues"`               // Activation cues (query, keywords)
-	Context  []Message `json:"context,omitempty"`  // Recent conversation
+	Goal     string    `json:"goal,omitempty"`    // Current task goal
+	Cues     []string  `json:"cues"`              // Activation cues (query, keywords)
+	Context  []Message `json:"context,omitempty"` // Recent conversation
 }
 
 // ActivatedContent holds full content for an activated memory.
@@ -134,10 +136,10 @@ type ActivatedContent struct {
 
 // WorkingMemoryResult is the result of memory activation.
 type WorkingMemoryResult struct {
-	Session           *WorkingMemorySession `json:"session"`
-	Activations       []ActivatedContent    `json:"activations"`
-	ActiveSchemas     []SchemaMatch         `json:"active_schemas,omitempty"`
-	SlotUsage         int                   `json:"slot_usage"`
-	MaxSlots          int                   `json:"max_slots"`
-	AssembledContext  string                `json:"assembled_context"` // Ready-to-use context for LLM
+	Session          *WorkingMemorySession `json:"session"`
+	Activations      []ActivatedContent    `json:"activations"`
+	ActiveSchemas    []SchemaMatch         `json:"active_schemas,omitempty"`
+	SlotUsage        int                   `json:"slot_usage"`
+	MaxSlots         int                   `json:"max_slots"`
+	AssembledContext string                `json:"assembled_context"` // Ready-to-use context for LLM
 }

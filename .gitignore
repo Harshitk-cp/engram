@@ -1,10 +1,13 @@
 # Binaries
 bin/
+dist/
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+/engram-server
+/engram-mcp
 
 #OS
 .DS_Store

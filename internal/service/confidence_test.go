@@ -12,14 +12,20 @@ import (
 )
 
 type mockMemoryStoreForConfidence struct {
-	memories     map[uuid.UUID]*domain.Memory
-	reinforced   map[uuid.UUID]struct{ conf float32; count int }
+	memories   map[uuid.UUID]*domain.Memory
+	reinforced map[uuid.UUID]struct {
+		conf  float32
+		count int
+	}
 }
 
 func newMockMemoryStoreForConfidence() *mockMemoryStoreForConfidence {
 	return &mockMemoryStoreForConfidence{
-		memories:   make(map[uuid.UUID]*domain.Memory),
-		reinforced: make(map[uuid.UUID]struct{ conf float32; count int }),
+		memories: make(map[uuid.UUID]*domain.Memory),
+		reinforced: make(map[uuid.UUID]struct {
+			conf  float32
+			count int
+		}),
 	}
 }
 
@@ -89,7 +95,18 @@ func (m *mockMemoryStoreForConfidence) UpdateReinforcement(ctx context.Context, 
 		mem.Confidence = confidence
 		mem.ReinforcementCount = reinforcementCount
 	}
-	m.reinforced[id] = struct{ conf float32; count int }{confidence, reinforcementCount}
+	m.reinforced[id] = struct {
+		conf  float32
+		count int
+	}{confidence, reinforcementCount}
+	return nil
+}
+
+func (m *mockMemoryStoreForConfidence) UpdateContent(ctx context.Context, id uuid.UUID, content string, embedding []float32) error {
+	return nil
+}
+
+func (m *mockMemoryStoreForConfidence) RedactContent(ctx context.Context, id uuid.UUID, tombstone string) error {
 	return nil
 }
 
@@ -97,6 +114,14 @@ func (m *mockMemoryStoreForConfidence) UpdateConfidence(ctx context.Context, id 
 	mem := m.memories[id]
 	if mem != nil {
 		mem.Confidence = confidence
+	}
+	return nil
+}
+
+func (m *mockMemoryStoreForConfidence) ApplyConfidenceDelta(ctx context.Context, id uuid.UUID, delta float32) error {
+	mem := m.memories[id]
+	if mem != nil {
+		mem.Confidence = clampConf(mem.Confidence + delta)
 	}
 	return nil
 }
@@ -113,7 +138,13 @@ func (m *mockMemoryStoreForConfidence) Archive(ctx context.Context, id uuid.UUID
 	return nil
 }
 
-func (m *mockMemoryStoreForConfidence) Restore(ctx context.Context, id uuid.UUID) error {
+func (m *mockMemoryStoreForConfidence) ListQuarantined(ctx context.Context, agentID, tenantID uuid.UUID, limit, offset int) ([]domain.Memory, int, error) {
+	return nil, 0, nil
+}
+func (m *mockMemoryStoreForConfidence) ReleaseQuarantine(ctx context.Context, id, tenantID uuid.UUID, newBinding domain.MemoryBinding) error {
+	return nil
+}
+func (m *mockMemoryStoreForConfidence) Restore(ctx context.Context, id uuid.UUID, tenantID uuid.UUID) error {
 	return nil
 }
 
@@ -147,6 +178,10 @@ func (m *mockMemoryStoreForConfidence) ArchiveExpiredSessionMemories(ctx context
 
 func (m *mockMemoryStoreForConfidence) PromoteSessionToAnchor(ctx context.Context, id uuid.UUID) (bool, error) {
 	return false, nil
+}
+
+func (m *mockMemoryStoreForConfidence) CountNeedsReview(ctx context.Context, agentID, tenantID uuid.UUID) (int, error) {
+	return 0, nil
 }
 
 func (m *mockMemoryStoreForConfidence) GetNeedsReview(ctx context.Context, agentID uuid.UUID, tenantID uuid.UUID, limit int) ([]domain.Memory, error) {
@@ -212,6 +247,30 @@ func TestConfidenceService_Reinforce_CapsAtMax(t *testing.T) {
 	updated := memStore.reinforced[mem.ID]
 	if updated.conf > float32(DefaultMaxConfidence) {
 		t.Errorf("confidence = %f, should not exceed %f", updated.conf, DefaultMaxConfidence)
+	}
+}
+
+func TestConfidenceService_Reinforce_MonotonicAtCeiling(t *testing.T) {
+	logger := zap.NewNop()
+	tenantID := uuid.New()
+	memStore := newMockMemoryStoreForConfidence()
+
+	mem := &domain.Memory{
+		AgentID:    uuid.New(),
+		TenantID:   tenantID,
+		Confidence: 1.0,
+		Provenance: domain.ProvenanceUser,
+	}
+	_ = memStore.Create(context.Background(), mem)
+
+	svc := NewConfidenceService(memStore, logger)
+	if err := svc.Reinforce(context.Background(), mem.ID, tenantID); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	updated := memStore.reinforced[mem.ID]
+	if updated.conf < 1.0 {
+		t.Errorf("reinforce lowered confidence from 1.0 to %f; must never decrease", updated.conf)
 	}
 }
 
@@ -283,10 +342,10 @@ func TestConfidenceService_ApplyDecay(t *testing.T) {
 	svc := NewConfidenceService(memStore, logger)
 
 	tests := []struct {
-		name           string
-		hoursAgo       float64
-		initialConf    float32
-		wantDecayed    bool
+		name        string
+		hoursAgo    float64
+		initialConf float32
+		wantDecayed bool
 	}{
 		{
 			name:        "recent memory no decay",
@@ -357,7 +416,7 @@ func TestProvenance_InitialConfidence(t *testing.T) {
 	}{
 		{domain.ProvenanceUser, 0.9},
 		{domain.ProvenanceTool, 0.8},
-		{domain.ProvenanceAgent, 0.6},
+		{domain.ProvenanceAgent, 0.72},
 		{domain.ProvenanceDerived, 0.5},
 		{domain.ProvenanceInferred, 0.4},
 		{domain.Provenance("unknown"), 0.5},
@@ -430,4 +489,12 @@ func TestConfidenceService_GetStats(t *testing.T) {
 	if stats.HoursSinceAccess < 99 || stats.HoursSinceAccess > 101 {
 		t.Errorf("HoursSinceAccess = %f, expected ~100", stats.HoursSinceAccess)
 	}
+}
+
+func (m *mockMemoryStoreForConfidence) ListByAgentFiltered(ctx context.Context, agentID, tenantID uuid.UUID, f domain.MemoryFilter, limit, offset int) ([]domain.Memory, int, error) {
+	return nil, 0, nil
+}
+
+func (m *mockMemoryStoreForConfidence) BeliefsAsOf(ctx context.Context, agentID, tenantID uuid.UUID, at time.Time, limit int) ([]domain.BeliefAtTime, int, error) {
+	return nil, 0, nil
 }

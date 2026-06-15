@@ -20,6 +20,14 @@ func newMockContradictionStoreForMetacog() *mockContradictionStoreForMetacog {
 	}
 }
 
+func (m *mockContradictionStoreForMetacog) CountByAgent(ctx context.Context, agentID, tenantID uuid.UUID) (int, error) {
+	return 0, nil
+}
+
+func (m *mockContradictionStoreForMetacog) ListByAgent(ctx context.Context, agentID, tenantID uuid.UUID, limit int) ([]domain.ContradictionPair, error) {
+	return nil, nil
+}
+
 func (m *mockContradictionStoreForMetacog) Create(ctx context.Context, beliefID, contradictedByID uuid.UUID) error {
 	contradiction := domain.BeliefContradiction{
 		ID:               uuid.New(),
@@ -526,5 +534,43 @@ func TestMetacognitiveService_SourceReliability(t *testing.T) {
 			t.Fatalf("expected source factor >= %f for %s, got %f",
 				tc.expectedMinScore, tc.source, assessment.Factors["source"])
 		}
+	}
+}
+
+// TestAssessConfidence_NoSaturation proves the metacognition fix: two
+// high-confidence memories that differ in base must produce DISTINCT adjusted
+// confidences. The old multiplicative formula pegged both at the 1.0 ceiling.
+func TestAssessConfidence_NoSaturation(t *testing.T) {
+	svc, _, _, _, _, _, _ := setupMetacognitiveTest()
+	ctx := context.Background()
+	now := time.Now()
+
+	mk := func(base float32) domain.Memory {
+		return domain.Memory{
+			ID:                 uuid.New(),
+			Content:            "x",
+			Type:               domain.MemoryTypePreference,
+			Confidence:         base,
+			LastVerifiedAt:     &now,
+			ReinforcementCount: 5, // strong reinforcement — the old formula saturated here
+			Source:             string(domain.SourceUserStatement),
+		}
+	}
+
+	a, err := svc.AssessConfidence(ctx, mk(0.80))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := svc.AssessConfidence(ctx, mk(0.95))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if a.AdjustedConfidence >= 1.0 || b.AdjustedConfidence >= 1.0 {
+		t.Fatalf("confidence saturated at ceiling: a=%f b=%f", a.AdjustedConfidence, b.AdjustedConfidence)
+	}
+	if b.AdjustedConfidence <= a.AdjustedConfidence {
+		t.Fatalf("expected higher base → higher adjusted (resolution preserved); a(0.80)=%f b(0.95)=%f",
+			a.AdjustedConfidence, b.AdjustedConfidence)
 	}
 }

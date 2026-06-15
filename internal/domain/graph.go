@@ -58,14 +58,14 @@ var RelationDecayMultipliers = map[RelationType]float64{
 }
 
 type GraphEdge struct {
-	ID             uuid.UUID    `json:"id"`
-	SourceID       uuid.UUID    `json:"source_id"`
-	TargetID       uuid.UUID    `json:"target_id"`
-	RelationType   RelationType `json:"relation_type"`
-	Strength       float32      `json:"strength"`
-	CreatedAt      time.Time    `json:"created_at"`
-	LastTraversedAt *time.Time  `json:"last_traversed_at,omitempty"`
-	TraversalCount int          `json:"traversal_count"`
+	ID              uuid.UUID    `json:"id"`
+	SourceID        uuid.UUID    `json:"source_id"`
+	TargetID        uuid.UUID    `json:"target_id"`
+	RelationType    RelationType `json:"relation_type"`
+	Strength        float32      `json:"strength"`
+	CreatedAt       time.Time    `json:"created_at"`
+	LastTraversedAt *time.Time   `json:"last_traversed_at,omitempty"`
+	TraversalCount  int          `json:"traversal_count"`
 }
 
 type EntityType string
@@ -99,10 +99,10 @@ type Entity struct {
 	Aliases    []string       `json:"aliases,omitempty"`
 	Embedding  []float32      `json:"embedding,omitempty"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
-	IsAnchor   bool      `json:"is_anchor,omitempty"`
-	ExternalID string    `json:"external_id,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	IsAnchor   bool           `json:"is_anchor,omitempty"`
+	ExternalID string         `json:"external_id,omitempty"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
 }
 
 type MentionType string
@@ -134,10 +134,10 @@ type GraphNeighbor struct {
 
 // TraversalConstraints controls graph traversal behavior
 type TraversalConstraints struct {
-	RespectTemporalOrder bool            // Only traverse to newer memories for causal edges
-	MaxAge               time.Duration   // Only include memories from last N duration
-	RelationFilter       []RelationType  // Only traverse these relation types (empty = all)
-	MinEdgeStrength      float32         // Only traverse edges above this strength
+	RespectTemporalOrder bool           // Only traverse to newer memories for causal edges
+	MaxAge               time.Duration  // Only include memories from last N duration
+	RelationFilter       []RelationType // Only traverse these relation types (empty = all)
+	MinEdgeStrength      float32        // Only traverse edges above this strength
 }
 
 // EdgeDecayResult tracks the outcome of edge decay operations
@@ -199,8 +199,8 @@ type EntityStore interface {
 }
 
 type ExtractedEntity struct {
-	Name       string     `json:"name"`
-	EntityType EntityType `json:"entity_type"`
+	Name       string      `json:"name"`
+	EntityType EntityType  `json:"entity_type"`
 	Role       MentionType `json:"role"`
 }
 
@@ -213,23 +213,23 @@ type DetectedRelationship struct {
 }
 
 type HybridRecallRequest struct {
-	Query        string    `json:"query"`
-	AgentID      uuid.UUID `json:"agent_id"`
-	TenantID     uuid.UUID `json:"tenant_id"`
-	TopK         int       `json:"top_k"`
-	VectorWeight float64   `json:"vector_weight"`
-	GraphWeight  float64   `json:"graph_weight"`
-	MaxGraphHops int       `json:"max_graph_hops"`
-	UseGraph     bool      `json:"use_graph"`
+	Query         string       `json:"query"`
+	AgentID       uuid.UUID    `json:"agent_id"`
+	TenantID      uuid.UUID    `json:"tenant_id"`
+	TopK          int          `json:"top_k"`
+	VectorWeight  float64      `json:"vector_weight"`
+	GraphWeight   float64      `json:"graph_weight"`
+	MaxGraphHops  int          `json:"max_graph_hops"`
+	UseGraph      bool         `json:"use_graph"`
 	MinConfidence float32      `json:"min_confidence,omitempty"`
 	MemoryType    *MemoryType  `json:"memory_type,omitempty"`
 	IncludeTiers  []MemoryTier `json:"include_tiers,omitempty"`
-	RecencyBoost float32 `json:"recency_boost,omitempty"`
-	EventDateFrom *time.Time `json:"event_date_from,omitempty"`
-	EventDateTo   *time.Time `json:"event_date_to,omitempty"`
-	Mode          RecallMode `json:"mode,omitempty"`
-	MinSimilarity float32    `json:"min_similarity,omitempty"`
-	MaxResults    int        `json:"max_results,omitempty"`
+	RecencyBoost  float32      `json:"recency_boost,omitempty"`
+	EventDateFrom *time.Time   `json:"event_date_from,omitempty"`
+	EventDateTo   *time.Time   `json:"event_date_to,omitempty"`
+	Mode          RecallMode   `json:"mode,omitempty"`
+	MinSimilarity float32      `json:"min_similarity,omitempty"`
+	MaxResults    int          `json:"max_results,omitempty"`
 	// AnchorID restricts recall to traces about this anchor (who/what the
 	// memory is about). When set, AgentID may be uuid.Nil for a cross-agent
 	// anchor lookup ("everything known about this guest").
@@ -240,11 +240,11 @@ type HybridRecallRequest struct {
 
 type ScoredMemory struct {
 	Memory
-	VectorScore   float32 `json:"vector_score"`
-	GraphScore    float32 `json:"graph_score"`
-	FinalScore    float32 `json:"score"`
-	GraphPath     []uuid.UUID `json:"graph_path,omitempty"`
-	PathLength    int     `json:"path_length,omitempty"`
+	VectorScore float32     `json:"vector_score"`
+	GraphScore  float32     `json:"graph_score"`
+	FinalScore  float32     `json:"score"`
+	GraphPath   []uuid.UUID `json:"graph_path,omitempty"`
+	PathLength  int         `json:"path_length,omitempty"`
 }
 
 type GraphTraversalResult struct {

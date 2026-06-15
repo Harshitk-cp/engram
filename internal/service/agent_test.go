@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/Harshitk-cp/engram/internal/domain"
@@ -46,6 +47,16 @@ func (m *mockAgentStore) GetByExternalID(ctx context.Context, externalID string,
 	return nil, store.ErrNotFound
 }
 
+func (m *mockAgentStore) CountByTenant(ctx context.Context, tenantID uuid.UUID) (int, error) {
+	n := 0
+	for _, a := range m.agents {
+		if a.TenantID == tenantID {
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (m *mockAgentStore) ListByTenantID(ctx context.Context, tenantID uuid.UUID, limit, offset int) ([]domain.Agent, error) {
 	var result []domain.Agent
 	for _, a := range m.agents {
@@ -81,6 +92,35 @@ func TestAgentService_Create(t *testing.T) {
 	}
 	if agent.ID == uuid.Nil {
 		t.Fatal("expected agent ID to be set")
+	}
+}
+
+func TestAgentService_Create_GeneratesExternalID(t *testing.T) {
+	s := NewAgentService(newMockAgentStore())
+	ctx := context.Background()
+
+	agent := &domain.Agent{
+		TenantID: uuid.New(),
+		Name:     "Support Bot 3000!",
+		// ExternalID intentionally omitted — service must derive a unique one.
+	}
+	if err := s.Create(ctx, agent); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if agent.ExternalID == "" {
+		t.Fatal("expected external_id to be generated")
+	}
+	if !strings.HasPrefix(agent.ExternalID, "support-bot-3000-") {
+		t.Fatalf("expected slug-prefixed external_id, got %q", agent.ExternalID)
+	}
+
+	// Two unnamed-id agents with the same name must not collide.
+	other := &domain.Agent{TenantID: agent.TenantID, Name: "Support Bot 3000!"}
+	if err := s.Create(ctx, other); err != nil {
+		t.Fatalf("expected no error on second create, got %v", err)
+	}
+	if other.ExternalID == agent.ExternalID {
+		t.Fatalf("generated external_ids collided: %q", other.ExternalID)
 	}
 }
 

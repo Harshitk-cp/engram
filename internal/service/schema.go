@@ -16,17 +16,17 @@ import (
 
 // Schema service constants
 const (
-	MinClusterSize            = 5    // Minimum memories to form a schema
-	MinEvidenceConfidence     = 0.6  // Minimum confidence for memories to count as evidence
+	MinClusterSize            = 5              // Minimum memories to form a schema
+	MinEvidenceConfidence     = 0.6            // Minimum confidence for memories to count as evidence
 	MinEvidenceAge            = 24 * time.Hour // Minimum stability period
-	SchemaSimilarityThreshold = 0.7  // For finding similar schemas
-	SchemaConfidenceBoost     = 0.05 // Confidence boost per evidence
-	MaxSchemaConfidence       = 0.95 // Maximum schema confidence
-	MinSchemaMatchScore       = 0.3  // Minimum score to consider a schema match
-	ContextMatchWeight        = 0.3  // Weight for context matching
-	TimeMatchWeight           = 0.2  // Weight for time-based matching
-	EmbeddingSimilarityWeight = 0.5  // Weight for embedding similarity
-	ClusteringThreshold       = 0.65 // Cosine similarity threshold for clustering
+	SchemaSimilarityThreshold = 0.7            // For finding similar schemas
+	SchemaConfidenceBoost     = 0.05           // Confidence boost per evidence
+	MaxSchemaConfidence       = 0.95           // Maximum schema confidence
+	MinSchemaMatchScore       = 0.3            // Minimum score to consider a schema match
+	ContextMatchWeight        = 0.3            // Weight for context matching
+	TimeMatchWeight           = 0.2            // Weight for time-based matching
+	EmbeddingSimilarityWeight = 0.5            // Weight for embedding similarity
+	ClusteringThreshold       = 0.65           // Cosine similarity threshold for clustering
 )
 
 var (
@@ -554,4 +554,27 @@ func averageVectors(a, b []float32) []float32 {
 		result[i] = (a[i] + b[i]) / 2
 	}
 	return result
+}
+
+// cloneVector returns a copy of v so callers can mutate it without aliasing the
+// source slice.
+func cloneVector(v []float32) []float32 {
+	out := make([]float32, len(v))
+	copy(out, v)
+	return out
+}
+
+// incrementalMean folds sample x into a running mean as the n-th observation:
+// mean += (x - mean) / n. This keeps every cluster member equally weighted,
+// unlike a pairwise average. Returns a new slice; inputs are not mutated.
+func incrementalMean(mean, x []float32, n int) []float32 {
+	if len(mean) != len(x) || n <= 0 {
+		return mean
+	}
+	inv := float32(1) / float32(n)
+	out := make([]float32, len(mean))
+	for i := range mean {
+		out[i] = mean[i] + (x[i]-mean[i])*inv
+	}
+	return out
 }

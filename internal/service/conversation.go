@@ -230,7 +230,6 @@ func (s *ConversationService) storeUserTurnsFallback(ctx context.Context, req *d
 	return m, nil
 }
 
-
 func (s *ConversationService) storeEnumerationTurns(ctx context.Context, req *domain.ConversationIngestRequest) []*domain.Memory {
 	var stored []*domain.Memory
 	for _, msg := range req.Messages {

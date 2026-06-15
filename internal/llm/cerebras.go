@@ -25,7 +25,7 @@ type CerebrasClient struct {
 
 func NewCerebrasClient(apiKey string) *CerebrasClient {
 	return &CerebrasClient{
-		apiKey: apiKey,
+		apiKey:     apiKey,
 		httpClient: &http.Client{Timeout: 120 * time.Second},
 	}
 }
@@ -59,7 +59,7 @@ func (c *CerebrasClient) complete(ctx context.Context, messages []cerebrasMessag
 		Model:       cerebrasModel,
 		Messages:    messages,
 		Temperature: temp,
-		MaxTokens: 8000,
+		MaxTokens:   8000,
 	})
 	if err != nil {
 		return "", fmt.Errorf("marshal cerebras request: %w", err)

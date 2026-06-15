@@ -13,13 +13,24 @@ type MockClient struct {
 	// EmbedResponse allows overriding the default hash-based embedding
 	EmbedResponse []float32
 	EmbedError    error
+	// dim is the embedding width produced (defaults to mockEmbeddingDim).
+	dim int
 
 	// Call tracking for assertions
 	EmbedCalls []string
 }
 
 func NewMockClient() *MockClient {
-	return &MockClient{}
+	return &MockClient{dim: mockEmbeddingDim}
+}
+
+// NewMockClientDim builds a mock client producing vectors of the given width, so
+// it can stand in for any configured embedding dimension.
+func NewMockClientDim(dim int) *MockClient {
+	if dim <= 0 {
+		dim = mockEmbeddingDim
+	}
+	return &MockClient{dim: dim}
 }
 
 func (c *MockClient) Embed(ctx context.Context, text string) ([]float32, error) {
@@ -30,17 +41,21 @@ func (c *MockClient) Embed(ctx context.Context, text string) ([]float32, error) 
 	if c.EmbedResponse != nil {
 		return c.EmbedResponse, nil
 	}
-	return generateDeterministicEmbedding(text), nil
+	dim := c.dim
+	if dim <= 0 {
+		dim = mockEmbeddingDim
+	}
+	return generateDeterministicEmbedding(text, dim), nil
 }
 
 // generateDeterministicEmbedding creates a reproducible embedding based on text hash.
 // This ensures the same text always produces the same embedding for consistent tests.
-func generateDeterministicEmbedding(text string) []float32 {
+func generateDeterministicEmbedding(text string, dim int) []float32 {
 	h := fnv.New64a()
 	h.Write([]byte(text))
 	seed := h.Sum64()
 
-	embedding := make([]float32, mockEmbeddingDim)
+	embedding := make([]float32, dim)
 	for i := range embedding {
 		// Use simple LCG for deterministic pseudo-random values
 		seed = seed*6364136223846793005 + 1442695040888963407

@@ -20,10 +20,10 @@ func NewAPIKeyStore(db *pgxpool.Pool) *APIKeyStore {
 
 func (s *APIKeyStore) Create(ctx context.Context, k *domain.APIKey) error {
 	return s.db.QueryRow(ctx,
-		`INSERT INTO api_keys (tenant_id, name, key_hash, key_prefix, scopes, expires_at)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		`INSERT INTO api_keys (tenant_id, name, key_hash, key_prefix, scopes, expires_at, created_by)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 RETURNING id, created_at`,
-		k.TenantID, k.Name, k.KeyHash, k.KeyPrefix, k.Scopes, k.ExpiresAt,
+		k.TenantID, k.Name, k.KeyHash, k.KeyPrefix, k.Scopes, k.ExpiresAt, k.CreatedBy,
 	).Scan(&k.ID, &k.CreatedAt)
 }
 
@@ -57,10 +57,11 @@ func (s *APIKeyStore) GetAuthByHash(ctx context.Context, hash string) (*domain.A
 // ListByTenantID returns all non-revoked keys for a tenant. Key hashes are never returned.
 func (s *APIKeyStore) ListByTenantID(ctx context.Context, tenantID uuid.UUID) ([]domain.APIKey, error) {
 	rows, err := s.db.Query(ctx,
-		`SELECT id, tenant_id, name, key_prefix, scopes, last_used_at, expires_at, revoked_at, created_at
-		 FROM api_keys
-		 WHERE tenant_id = $1 AND revoked_at IS NULL
-		 ORDER BY created_at DESC`,
+		`SELECT ak.id, ak.tenant_id, ak.name, ak.key_prefix, ak.scopes, ak.last_used_at, ak.expires_at, ak.revoked_at, ak.created_at, ak.created_by, u.email
+		 FROM api_keys ak
+		 LEFT JOIN users u ON u.id = ak.created_by
+		 WHERE ak.tenant_id = $1 AND ak.revoked_at IS NULL
+		 ORDER BY ak.created_at DESC`,
 		tenantID,
 	)
 	if err != nil {
@@ -71,7 +72,7 @@ func (s *APIKeyStore) ListByTenantID(ctx context.Context, tenantID uuid.UUID) ([
 	var keys []domain.APIKey
 	for rows.Next() {
 		var k domain.APIKey
-		if err := rows.Scan(&k.ID, &k.TenantID, &k.Name, &k.KeyPrefix, &k.Scopes, &k.LastUsedAt, &k.ExpiresAt, &k.RevokedAt, &k.CreatedAt); err != nil {
+		if err := rows.Scan(&k.ID, &k.TenantID, &k.Name, &k.KeyPrefix, &k.Scopes, &k.LastUsedAt, &k.ExpiresAt, &k.RevokedAt, &k.CreatedAt, &k.CreatedBy, &k.CreatedByEmail); err != nil {
 			return nil, err
 		}
 		keys = append(keys, k)

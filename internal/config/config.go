@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -93,13 +94,35 @@ func LLMAPIKey() string {
 }
 
 // EmbeddingAPIKey returns the API key for the configured embedding provider.
+// A generic EMBEDDING_API_KEY takes precedence (for self-hosted / non-OpenAI
+// providers); otherwise it falls back to the OpenAI key.
 func EmbeddingAPIKey() string {
 	switch EmbeddingProvider() {
 	case "mock":
 		return ""
 	default:
+		if k := os.Getenv("EMBEDDING_API_KEY"); k != "" {
+			return k
+		}
 		return OpenAIAPIKey()
 	}
+}
+
+func EmbeddingModel() string {
+	return os.Getenv("EMBEDDING_MODEL")
+}
+
+func EmbeddingBaseURL() string {
+	return os.Getenv("EMBEDDING_BASE_URL")
+}
+
+func EmbeddingDim() int {
+	if v := os.Getenv("EMBEDDING_DIM"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 1536
 }
 
 // SetupToken returns ENGRAM_SETUP_TOKEN. If empty, POST /v1/setup is disabled.
@@ -137,6 +160,125 @@ func RateLimitBurst() int {
 		return 20
 	}
 	return burst
+}
+
+// CORSAllowedOrigins returns the browser origins permitted to call the API,
+// parsed from the comma-separated CORS_ALLOWED_ORIGINS env var. An empty result
+// disables CORS; a single "*" allows any origin. Used by the console frontend.
+func CORSAllowedOrigins() []string {
+	raw := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS"))
+	if raw == "" {
+		return nil
+	}
+	var origins []string
+	for _, o := range strings.Split(raw, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			origins = append(origins, o)
+		}
+	}
+	return origins
+}
+
+// ---- Control plane (console auth) ----
+
+// DefaultTenantID, if set, is the org that newly-signed-up users auto-join
+// (instead of getting a fresh org). Used to point demo signups at seeded data.
+func DefaultTenantID() string { return strings.TrimSpace(os.Getenv("ENGRAM_DEFAULT_TENANT_ID")) }
+
+// DefaultTenantRole is the role new users get when auto-joining the default org.
+// Product default is "member"; set to "admin" in a demo so signups can manage
+// keys and resolve contradictions on the shared seeded org.
+func DefaultTenantRole() string {
+	r := strings.ToLower(strings.TrimSpace(os.Getenv("ENGRAM_DEFAULT_TENANT_ROLE")))
+	switch r {
+	case "owner", "admin", "member":
+		return r
+	default:
+		return "member"
+	}
+}
+
+// SessionTTLHours is how long a console session lasts. Default 7 days. A shorter
+// lifetime narrows the window during which a stolen session token is usable;
+// override with SESSION_TTL_HOURS.
+func SessionTTLHours() int {
+	if n, err := strconv.Atoi(os.Getenv("SESSION_TTL_HOURS")); err == nil && n > 0 {
+		return n
+	}
+	return 168
+}
+
+// CookieSecure controls the Secure flag on the session cookie. Defaults to true
+// (secure-by-default) so a forgotten env var in production never ships the
+// session token over cleartext HTTP. For local http://localhost development set
+// COOKIE_SECURE=false explicitly.
+func CookieSecure() bool { return !strings.EqualFold(os.Getenv("COOKIE_SECURE"), "false") }
+
+// TrustProxyHeaders controls whether client-IP headers (X-Real-IP /
+// X-Forwarded-For) are honored. Default false: on a directly-exposed server
+// those headers are attacker-controlled and would let anyone spoof the IP the
+// rate limiter keys on. Set TRUST_PROXY_HEADERS=true only behind a proxy that
+// strips and re-sets them.
+func TrustProxyHeaders() bool { return strings.EqualFold(os.Getenv("TRUST_PROXY_HEADERS"), "true") }
+
+// AppBaseURL is the externally-reachable base URL, used to build OAuth redirect
+// URIs. Defaults to http://localhost:<port>.
+func AppBaseURL() string {
+	if v := strings.TrimSpace(os.Getenv("APP_BASE_URL")); v != "" {
+		return strings.TrimRight(v, "/")
+	}
+	return fmt.Sprintf("http://localhost:%d", ServerPort())
+}
+
+// GoogleOAuth returns (clientID, clientSecret); empty when not configured.
+func GoogleOAuth() (string, string) {
+	return os.Getenv("GOOGLE_OAUTH_CLIENT_ID"), os.Getenv("GOOGLE_OAUTH_CLIENT_SECRET")
+}
+
+// GitHubOAuth returns (clientID, clientSecret); empty when not configured.
+func GitHubOAuth() (string, string) {
+	return os.Getenv("GITHUB_OAUTH_CLIENT_ID"), os.Getenv("GITHUB_OAUTH_CLIENT_SECRET")
+}
+
+// WorkOSAuth returns (clientID, apiKey) for WorkOS enterprise SSO (AuthKit);
+// empty when not configured. The API key is the client secret for token exchange.
+func WorkOSAuth() (string, string) {
+	return os.Getenv("WORKOS_CLIENT_ID"), os.Getenv("WORKOS_API_KEY")
+}
+
+// AuditSigningKey is an optional HMAC secret used to sign audit exports so a
+// recipient can confirm an export came from this server. Empty = unsigned export.
+func AuditSigningKey() string { return os.Getenv("AUDIT_SIGNING_KEY") }
+
+// ---- Billing / managed cloud (Stripe) ----
+
+// StripeSecretKey is the Stripe API secret. When empty, billing is disabled:
+// the checkout/portal/webhook endpoints report "not configured" and quota
+// enforcement is a no-op, so self-hosted/OSS deployments run unmetered.
+func StripeSecretKey() string { return strings.TrimSpace(os.Getenv("STRIPE_SECRET_KEY")) }
+
+// StripeWebhookSecret verifies the signature on incoming Stripe webhook events.
+func StripeWebhookSecret() string { return strings.TrimSpace(os.Getenv("STRIPE_WEBHOOK_SECRET")) }
+
+// BillingEnabled reports whether managed-cloud billing + quota enforcement is on.
+// Gated solely on a Stripe secret being configured.
+func BillingEnabled() bool { return StripeSecretKey() != "" }
+
+// StripePriceIDs maps the self-serve plan names to their Stripe Price IDs,
+// created in the Stripe dashboard. Plans without a configured price can't be
+// purchased via checkout.
+func StripePriceIDs() map[string]string {
+	m := map[string]string{}
+	if v := strings.TrimSpace(os.Getenv("STRIPE_PRICE_DEVELOPER")); v != "" {
+		m["developer"] = v
+	}
+	if v := strings.TrimSpace(os.Getenv("STRIPE_PRICE_TEAM")); v != "" {
+		m["team"] = v
+	}
+	if v := strings.TrimSpace(os.Getenv("STRIPE_PRICE_GROWTH")); v != "" {
+		m["growth"] = v
+	}
+	return m
 }
 
 // LogLevel returns the log level (debug, info, warn, error).

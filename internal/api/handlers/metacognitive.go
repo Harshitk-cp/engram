@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/Harshitk-cp/engram/internal/api/middleware"
 	"github.com/Harshitk-cp/engram/internal/service"
 	"github.com/google/uuid"
 )
@@ -41,12 +42,12 @@ type memoryResponse struct {
 }
 
 type uncertaintyReportResponse struct {
-	Topic               string           `json:"topic,omitempty"`
-	UncertaintyLevel    float32          `json:"uncertainty_level"`
-	ContradictedBeliefs []memoryResponse `json:"contradicted_beliefs"`
+	Topic                string           `json:"topic,omitempty"`
+	UncertaintyLevel     float32          `json:"uncertainty_level"`
+	ContradictedBeliefs  []memoryResponse `json:"contradicted_beliefs"`
 	LowConfidenceBeliefs []memoryResponse `json:"low_confidence_beliefs"`
-	StaleBeliefs        []memoryResponse `json:"stale_beliefs"`
-	Recommendation      string           `json:"recommendation"`
+	StaleBeliefs         []memoryResponse `json:"stale_beliefs"`
+	Recommendation       string           `json:"recommendation"`
 }
 
 type metacogProcedureResponse struct {
@@ -60,8 +61,8 @@ type metacogProcedureResponse struct {
 
 type procedureAssessmentResponse struct {
 	Procedure      metacogProcedureResponse `json:"procedure"`
-	SuccessRate    float32           `json:"success_rate"`
-	Recommendation string            `json:"recommendation"`
+	SuccessRate    float32                  `json:"success_rate"`
+	Recommendation string                   `json:"recommendation"`
 }
 
 type failurePatternResponse struct {
@@ -116,12 +117,13 @@ func (h *MetacognitiveHandler) Reflect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get tenant ID from context
-	tenantID, ok := r.Context().Value("tenant_id").(uuid.UUID)
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "tenant_id not found in context")
+	// Get tenant from context
+	tenant := middleware.TenantFromContext(r.Context())
+	if tenant == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	tenantID := tenant.ID
 
 	result, err := h.metacognitiveService.Reflect(r.Context(), agentID, tenantID, req.Focus)
 	if err != nil {
@@ -155,12 +157,12 @@ func (h *MetacognitiveHandler) Reflect(w http.ResponseWriter, r *http.Request) {
 	if result.UncertaintyReport != nil {
 		ur := result.UncertaintyReport
 		resp.UncertaintyReport = &uncertaintyReportResponse{
-			Topic:               ur.Topic,
-			UncertaintyLevel:    ur.UncertaintyLevel,
-			ContradictedBeliefs: make([]memoryResponse, len(ur.ContradictedBeliefs)),
+			Topic:                ur.Topic,
+			UncertaintyLevel:     ur.UncertaintyLevel,
+			ContradictedBeliefs:  make([]memoryResponse, len(ur.ContradictedBeliefs)),
 			LowConfidenceBeliefs: make([]memoryResponse, len(ur.LowConfidenceBeliefs)),
-			StaleBeliefs:        make([]memoryResponse, len(ur.StaleBeliefs)),
-			Recommendation:      ur.Recommendation,
+			StaleBeliefs:         make([]memoryResponse, len(ur.StaleBeliefs)),
+			Recommendation:       ur.Recommendation,
 		}
 
 		for i, m := range ur.ContradictedBeliefs {
@@ -265,12 +267,13 @@ func (h *MetacognitiveHandler) AssessConfidence(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Get tenant ID from context
-	tenantID, ok := r.Context().Value("tenant_id").(uuid.UUID)
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "tenant_id not found in context")
+	// Get tenant from context
+	tenant := middleware.TenantFromContext(r.Context())
+	if tenant == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	tenantID := tenant.ID
 
 	explanation, adjustedConfidence, err := h.metacognitiveService.GetConfidenceExplanationForMemory(r.Context(), memoryID, tenantID)
 	if err != nil {
@@ -310,12 +313,13 @@ func (h *MetacognitiveHandler) DetectUncertainty(w http.ResponseWriter, r *http.
 
 	topic := r.URL.Query().Get("topic")
 
-	// Get tenant ID from context
-	tenantID, ok := r.Context().Value("tenant_id").(uuid.UUID)
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "tenant_id not found in context")
+	// Get tenant from context
+	tenant := middleware.TenantFromContext(r.Context())
+	if tenant == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
+	tenantID := tenant.ID
 
 	result, err := h.metacognitiveService.DetectUncertainty(r.Context(), agentID, tenantID, topic)
 	if err != nil {
@@ -325,12 +329,12 @@ func (h *MetacognitiveHandler) DetectUncertainty(w http.ResponseWriter, r *http.
 
 	// Convert to response
 	resp := uncertaintyReportResponse{
-		Topic:               result.Topic,
-		UncertaintyLevel:    result.UncertaintyLevel,
-		ContradictedBeliefs: make([]memoryResponse, len(result.ContradictedBeliefs)),
+		Topic:                result.Topic,
+		UncertaintyLevel:     result.UncertaintyLevel,
+		ContradictedBeliefs:  make([]memoryResponse, len(result.ContradictedBeliefs)),
 		LowConfidenceBeliefs: make([]memoryResponse, len(result.LowConfidenceBeliefs)),
-		StaleBeliefs:        make([]memoryResponse, len(result.StaleBeliefs)),
-		Recommendation:      result.Recommendation,
+		StaleBeliefs:         make([]memoryResponse, len(result.StaleBeliefs)),
+		Recommendation:       result.Recommendation,
 	}
 
 	for i, m := range result.ContradictedBeliefs {
