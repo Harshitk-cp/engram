@@ -24,7 +24,7 @@ type GeminiClient struct {
 func NewGeminiClient(apiKey string) *GeminiClient {
 	return &GeminiClient{
 		apiKey:     apiKey,
-		httpClient: &http.Client{},
+		httpClient: &http.Client{Timeout: defaultLLMHTTPTimeout},
 	}
 }
 

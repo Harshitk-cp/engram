@@ -5,9 +5,31 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
+
+// envInt32 reads a positive int32 env var, falling back to def.
+func envInt32(key string, def int32) int32 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return int32(n)
+		}
+	}
+	return def
+}
+
+// envDurationSecs reads an env var holding a number of seconds, falling back to
+// defSecs. A value of 0 is honored (e.g. "no max lifetime").
+func envDurationSecs(key string, defSecs int) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return time.Duration(defSecs) * time.Second
+}
 
 // Load reads the .env file specified by ENGRAM_ENV (or .env by default),
 // then loads the corresponding .secret file if it exists.
@@ -280,6 +302,29 @@ func StripePriceIDs() map[string]string {
 	}
 	return m
 }
+
+// ---- Database connection pool ----
+//
+// pgx's default pool maxes at 4 connections, which starves a busy server (every
+// recall, decay pass, and background worker competes for them). These knobs let
+// operators size the pool to their Postgres without needing PgBouncer for
+// small-to-mid deployments.
+
+// DBMaxConns caps the pgx pool size. Override with DB_MAX_CONNS. Default 25.
+func DBMaxConns() int32 { return envInt32("DB_MAX_CONNS", 25) }
+
+// DBMinConns is the warm floor of connections kept open. Override with
+// DB_MIN_CONNS. Default 2.
+func DBMinConns() int32 { return envInt32("DB_MIN_CONNS", 2) }
+
+// DBMaxConnLifetime recycles a connection after this long (guards against
+// server-side connection state drift / load-balancer staleness). Override with
+// DB_MAX_CONN_LIFETIME_SECS. Default 1h.
+func DBMaxConnLifetime() time.Duration { return envDurationSecs("DB_MAX_CONN_LIFETIME_SECS", 3600) }
+
+// DBMaxConnIdleTime closes a connection idle this long, returning it to Postgres.
+// Override with DB_MAX_CONN_IDLE_SECS. Default 30m.
+func DBMaxConnIdleTime() time.Duration { return envDurationSecs("DB_MAX_CONN_IDLE_SECS", 1800) }
 
 // LogLevel returns the log level (debug, info, warn, error).
 // Defaults to "info" if not set.

@@ -20,6 +20,21 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, map[string]string{"error": msg})
 }
 
+// MaxPageLimit is the hard ceiling on any list/recall page size. It caps the
+// damage from an accidental or malicious `?limit=1000000`, which would otherwise
+// turn into an unbounded scan + allocation.
+const MaxPageLimit = 1000
+
+// clampLimit applies the upper bound only — callers keep their own defaults and
+// lower-bound handling, so wrapping an existing parse is behavior-preserving for
+// every legitimate (<= MaxPageLimit) value.
+func clampLimit(n int) int {
+	if n > MaxPageLimit {
+		return MaxPageLimit
+	}
+	return n
+}
+
 func requireAgentInTenant(w http.ResponseWriter, r *http.Request, agents domain.AgentStore, agentID, tenantID uuid.UUID) bool {
 	agent, err := agents.GetByID(r.Context(), agentID, tenantID)
 	if err != nil {

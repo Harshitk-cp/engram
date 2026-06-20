@@ -48,11 +48,11 @@ type createMemoryRequest struct {
 
 type createMemoryResponse struct {
 	*domain.Memory
-	Reinforced bool              `json:"reinforced"`
-	Tier       domain.MemoryTier `json:"tier"`
-	TierReason string            `json:"tier_reason"`
-	Quarantined      bool   `json:"quarantined,omitempty"`
-	QuarantineReason string `json:"quarantine_reason,omitempty"`
+	Reinforced       bool              `json:"reinforced"`
+	Tier             domain.MemoryTier `json:"tier"`
+	TierReason       string            `json:"tier_reason"`
+	Quarantined      bool              `json:"quarantined,omitempty"`
+	QuarantineReason string            `json:"quarantine_reason,omitempty"`
 }
 
 type getMemoryResponse struct {
@@ -297,7 +297,7 @@ func (h *MemoryHandler) ListQuarantine(w http.ResponseWriter, r *http.Request) {
 	limit, offset := 50, 0
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, e := strconv.Atoi(v); e == nil {
-			limit = n
+			limit = clampLimit(n)
 		}
 	}
 	if v := r.URL.Query().Get("offset"); v != "" {

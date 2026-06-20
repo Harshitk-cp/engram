@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"runtime"
@@ -252,8 +253,13 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 		r.NotFound(spaFallback(spa))
 	}
 
-	// Health (no auth)
+	// Health (no auth). /livez is a dependency-free liveness probe (is the
+	// process up?); /health is a readiness probe that checks DB connectivity
+	// (should this instance receive traffic?). The split lets Kubernetes restart
+	// a wedged process without pulling a healthy-but-briefly-DB-blipped one out
+	// of rotation.
 	r.Get("/health", healthHandler(db))
+	r.Get("/livez", livenessHandler())
 
 	// Metrics (no auth)
 	r.Get("/metrics", app.metricsHandler())
@@ -523,32 +529,70 @@ func healthHandler(db *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+// metricsHandler serves runtime metrics. It defaults to the Prometheus text
+// exposition format (so Prometheus/Grafana/k8s can scrape `/metrics` natively),
+// and falls back to the original JSON shape when the caller asks for it via
+// `Accept: application/json` or `?format=json` (backward compatible).
+// livenessHandler is a dependency-free liveness probe: it returns 200 as long
+// as the process can serve HTTP, independent of the database or any provider.
+func livenessHandler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}
+}
+
 func (app *App) metricsHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var memStats runtime.MemStats
 		runtime.ReadMemStats(&memStats)
-
 		uptime := time.Since(app.startTime)
 
-		response := map[string]any{
-			"uptime_seconds": uptime.Seconds(),
-			"uptime_human":   uptime.Round(time.Second).String(),
-			"request_count":  app.requestCount.Load(),
-			"error_count":    app.errorCount.Load(),
-			"goroutines":     runtime.NumGoroutine(),
-			"memory": map[string]any{
-				"alloc_mb":       float64(memStats.Alloc) / 1024 / 1024,
-				"total_alloc_mb": float64(memStats.TotalAlloc) / 1024 / 1024,
-				"sys_mb":         float64(memStats.Sys) / 1024 / 1024,
-				"num_gc":         memStats.NumGC,
-			},
-			"go_version": runtime.Version(),
+		if wantsJSON(r) {
+			response := map[string]any{
+				"uptime_seconds": uptime.Seconds(),
+				"uptime_human":   uptime.Round(time.Second).String(),
+				"request_count":  app.requestCount.Load(),
+				"error_count":    app.errorCount.Load(),
+				"goroutines":     runtime.NumGoroutine(),
+				"memory": map[string]any{
+					"alloc_mb":       float64(memStats.Alloc) / 1024 / 1024,
+					"total_alloc_mb": float64(memStats.TotalAlloc) / 1024 / 1024,
+					"sys_mb":         float64(memStats.Sys) / 1024 / 1024,
+					"num_gc":         memStats.NumGC,
+				},
+				"go_version": runtime.Version(),
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(response)
+			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(response)
+		m := func(help, typ, name string, value any) {
+			fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s %v\n", name, help, name, typ, name, value)
+		}
+		m("Seconds since the server started.", "gauge", "engram_uptime_seconds", uptime.Seconds())
+		m("Total HTTP requests handled.", "counter", "engram_http_requests_total", app.requestCount.Load())
+		m("Total HTTP responses with a 5xx/error status.", "counter", "engram_http_errors_total", app.errorCount.Load())
+		m("Current number of goroutines.", "gauge", "engram_goroutines", runtime.NumGoroutine())
+		m("Bytes of allocated heap currently in use.", "gauge", "engram_memory_alloc_bytes", memStats.Alloc)
+		m("Bytes of memory obtained from the OS.", "gauge", "engram_memory_sys_bytes", memStats.Sys)
+		m("Total bytes allocated over the process lifetime.", "counter", "engram_memory_alloc_bytes_total", memStats.TotalAlloc)
+		m("Total completed garbage-collection cycles.", "counter", "engram_gc_cycles_total", memStats.NumGC)
 	}
+}
+
+// wantsJSON reports whether the caller explicitly requested JSON (via the
+// Accept header or ?format=json), used to keep /metrics backward compatible.
+func wantsJSON(r *http.Request) bool {
+	if strings.EqualFold(r.URL.Query().Get("format"), "json") {
+		return true
+	}
+	return strings.Contains(r.Header.Get("Accept"), "application/json")
 }
 
 // Ensure stores and clients satisfy interfaces at compile time.
