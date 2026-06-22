@@ -272,32 +272,37 @@ func WorkOSAuth() (string, string) {
 // recipient can confirm an export came from this server. Empty = unsigned export.
 func AuditSigningKey() string { return os.Getenv("AUDIT_SIGNING_KEY") }
 
-// ---- Billing / managed cloud (Stripe) ----
+// ---- Billing / managed cloud (Razorpay) ----
 
-// StripeSecretKey is the Stripe API secret. When empty, billing is disabled:
-// the checkout/portal/webhook endpoints report "not configured" and quota
-// enforcement is a no-op, so self-hosted/OSS deployments run unmetered.
-func StripeSecretKey() string { return strings.TrimSpace(os.Getenv("STRIPE_SECRET_KEY")) }
+// RazorpayKeyID is the public Razorpay API key id (also handed to the browser to
+// open the Checkout modal).
+func RazorpayKeyID() string { return strings.TrimSpace(os.Getenv("RAZORPAY_KEY_ID")) }
 
-// StripeWebhookSecret verifies the signature on incoming Stripe webhook events.
-func StripeWebhookSecret() string { return strings.TrimSpace(os.Getenv("STRIPE_WEBHOOK_SECRET")) }
+// RazorpayKeySecret is the Razorpay API key secret used for server-side API calls
+// and payment-signature verification.
+func RazorpayKeySecret() string { return strings.TrimSpace(os.Getenv("RAZORPAY_KEY_SECRET")) }
+
+// RazorpayWebhookSecret verifies the signature on incoming Razorpay webhook events.
+func RazorpayWebhookSecret() string { return strings.TrimSpace(os.Getenv("RAZORPAY_WEBHOOK_SECRET")) }
 
 // BillingEnabled reports whether managed-cloud billing + quota enforcement is on.
-// Gated solely on a Stripe secret being configured.
-func BillingEnabled() bool { return StripeSecretKey() != "" }
+// Gated on a Razorpay key id + secret being configured; when unset the
+// checkout/verify/cancel/webhook endpoints report "not configured" and quota
+// enforcement is a no-op, so self-hosted/OSS deployments run unmetered.
+func BillingEnabled() bool { return RazorpayKeyID() != "" && RazorpayKeySecret() != "" }
 
-// StripePriceIDs maps the self-serve plan names to their Stripe Price IDs,
-// created in the Stripe dashboard. Plans without a configured price can't be
+// RazorpayPlanIDs maps the self-serve plan names to their Razorpay Plan IDs,
+// created in the Razorpay dashboard. Plans without a configured plan id can't be
 // purchased via checkout.
-func StripePriceIDs() map[string]string {
+func RazorpayPlanIDs() map[string]string {
 	m := map[string]string{}
-	if v := strings.TrimSpace(os.Getenv("STRIPE_PRICE_DEVELOPER")); v != "" {
+	if v := strings.TrimSpace(os.Getenv("RAZORPAY_PLAN_DEVELOPER")); v != "" {
 		m["developer"] = v
 	}
-	if v := strings.TrimSpace(os.Getenv("STRIPE_PRICE_TEAM")); v != "" {
+	if v := strings.TrimSpace(os.Getenv("RAZORPAY_PLAN_TEAM")); v != "" {
 		m["team"] = v
 	}
-	if v := strings.TrimSpace(os.Getenv("STRIPE_PRICE_GROWTH")); v != "" {
+	if v := strings.TrimSpace(os.Getenv("RAZORPAY_PLAN_GROWTH")); v != "" {
 		m["growth"] = v
 	}
 	return m

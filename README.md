@@ -323,12 +323,14 @@ The full, browsable reference lives at **[docs.hakuya.ai/api-reference](https://
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/v1/billing` | Subscription plan & usage |
-| `POST` | `/v1/billing/checkout` | Stripe Checkout session |
+| `POST` | `/v1/billing/checkout` | Create Razorpay subscription (returns `subscription_id` + `key_id`) |
+| `POST` | `/v1/billing/verify` | Verify the Checkout modal's payment signature |
+| `POST` | `/v1/billing/cancel` | Cancel the org's subscription |
 | `GET` `PUT` | `/v1/settings` | Per-tenant engine tuning |
 
 ## Managed Cloud & Plans
 
-The server enforces per-org plans and usage quotas (memories written, recalls, agent count) when billing is enabled. Billing is **gated on `STRIPE_SECRET_KEY`** — leave it unset for unlimited self-hosted use.
+The server enforces per-org plans and usage quotas (memories written, recalls, agent count) when billing is enabled. Billing is **gated on `RAZORPAY_KEY_ID` + `RAZORPAY_KEY_SECRET`** — leave them unset for unlimited self-hosted use. Self-serve upgrades use the embedded Razorpay Checkout modal; plan state is reconciled from the `subscription.*` webhook.
 
 | Plan | Agents | Memories / mo |
 |---|---|---|
@@ -349,7 +351,7 @@ The server enforces per-org plans and usage quotas (memories written, recalls, a
 | `OPENAI_API_KEY` | - | OpenAI API key |
 | `ANTHROPIC_API_KEY` | - | Anthropic API key |
 | `ENGRAM_SETUP_TOKEN` | - | Token gating `POST /v1/setup` |
-| `STRIPE_SECRET_KEY` | - | Enables billing/quota enforcement when set |
+| `RAZORPAY_KEY_ID` / `RAZORPAY_KEY_SECRET` | - | Enables billing/quota enforcement when both set |
 | `RATE_LIMIT_RPS` | 100 | Requests per second |
 | `LOG_LEVEL` | info | Log level |
 

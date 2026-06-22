@@ -167,13 +167,13 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	apiKeyStore := store.NewAPIKeyStore(db)
 
 	// Billing (managed cloud): per-org plan + usage. Quota enforcement and the
-	// Stripe endpoints activate only when STRIPE_SECRET_KEY is configured; an
-	// unconfigured (self-hosted/OSS) server runs unmetered.
+	// Razorpay endpoints activate only when RAZORPAY_KEY_ID + RAZORPAY_KEY_SECRET
+	// are configured; an unconfigured (self-hosted/OSS) server runs unmetered.
 	billingStore := store.NewBillingStore(db)
-	stripeClient := billing.New(config.StripeSecretKey(), config.StripeWebhookSecret(), config.StripePriceIDs())
+	rzpClient := billing.New(config.RazorpayKeyID(), config.RazorpayKeySecret(), config.RazorpayWebhookSecret(), config.RazorpayPlanIDs())
 	billingEnabled := config.BillingEnabled()
 	if billingEnabled {
-		logger.Info("billing enabled (Stripe configured) — quotas enforced")
+		logger.Info("billing enabled (Razorpay configured) — quotas enforced")
 	}
 
 	// Control plane (console auth): users, social identities, orgs, sessions.
@@ -208,7 +208,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	consoleHandler := handlers.NewConsoleHandler(consoleSvc)
 	auditHandler := handlers.NewAuditHandler(mutationLogStore, config.AuditSigningKey())
 	settingsHandler := handlers.NewSettingsHandler(tenantSettingsStore)
-	billingHandler := handlers.NewBillingHandler(billingStore, stripeClient, config.AppBaseURL(), logger)
+	billingHandler := handlers.NewBillingHandler(billingStore, rzpClient, config.AppBaseURL(), logger)
 	mindHandler := handlers.NewMindHandler(memoryStore, episodeStore, procedureStore, schemaStore, agentStore)
 	tierHandler := handlers.NewTierHandler(memorySvc)
 	graphHandler := handlers.NewGraphHandler(hybridRecallSvc, graphBuilderSvc, graphStore, entityStore, agentStore, memoryStore)
@@ -243,7 +243,7 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	r.Use(middleware.Recoverer)                                         // Recover from panics
 	r.Use(mw.RateLimit(config.RateLimitRPS(), config.RateLimitBurst())) // Rate limiting
 
-	// Embedded console SPA served at the site root (e.g. console.engram.to): any
+	// Embedded console SPA served at the site root (e.g. console.hakuya.ai): any
 	// unmatched path — static assets and client-side deep links alike — falls
 	// through to it, while requests under an API namespace still get a JSON 404
 	// rather than the HTML shell.
@@ -276,8 +276,8 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	// Legacy tenant creation (deprecated, kept for backward compatibility)
 	r.With(strictLimit).Post("/v1/tenants", tenantHandler.Create)
 
-	// Stripe webhook (no session/key auth — verified by signature). Mounted
-	// outside the /v1 auth group because Stripe calls it directly.
+	// Razorpay webhook (no session/key auth — verified by signature). Mounted
+	// outside the /v1 auth group because Razorpay calls it directly.
 	r.Post("/v1/billing/webhook", billingHandler.Webhook)
 
 	// Authenticated routes
@@ -308,13 +308,16 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 			r.Delete("/{id}", setupHandler.RevokeKey)
 		})
 
-		// Billing (managed cloud). Reads + checkout/portal require admin scope,
-		// which console owners/admins carry. Webhook is mounted separately (no auth).
+		// Billing (managed cloud). Reads + checkout/verify/cancel require admin
+		// scope, which console owners/admins carry. Webhook is mounted separately
+		// (no auth). Checkout creates a Razorpay subscription; verify confirms the
+		// client-side payment signature; cancel ends the subscription.
 		r.Route("/billing", func(r chi.Router) {
 			r.Use(mw.RequireScope("admin"))
 			r.Get("/", billingHandler.Get)
 			r.Post("/checkout", billingHandler.Checkout)
-			r.Post("/portal", billingHandler.Portal)
+			r.Post("/verify", billingHandler.Verify)
+			r.Post("/cancel", billingHandler.Cancel)
 		})
 
 		// Agents

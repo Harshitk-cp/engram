@@ -42,7 +42,7 @@ func writeQuotaError(w http.ResponseWriter, resource string, limit, used int64) 
 }
 
 // EnforceMemoryQuota blocks memory writes once the org hits its monthly cap and,
-// on a successful write, increments the counter. When enabled is false (no Stripe
+// on a successful write, increments the counter. When enabled is false (no Razorpay
 // configured) it is a pass-through, so self-hosted/OSS runs unmetered.
 func EnforceMemoryQuota(billing domain.BillingStore, enabled bool) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {

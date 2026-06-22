@@ -27,10 +27,7 @@ func (f *fakeBillingStore) GetBilling(_ context.Context, tid uuid.UUID) (*domain
 	}
 	return &domain.Billing{TenantID: tid, Plan: f.plan, SubscriptionStatus: "active"}, nil
 }
-func (f *fakeBillingStore) GetByStripeCustomer(context.Context, string) (*domain.Billing, error) {
-	return nil, nil
-}
-func (f *fakeBillingStore) SetStripeCustomer(context.Context, uuid.UUID, string) error { return nil }
+func (f *fakeBillingStore) SetRazorpayCustomer(context.Context, uuid.UUID, string) error { return nil }
 func (f *fakeBillingStore) SetSubscription(context.Context, uuid.UUID, domain.Plan, string, string) error {
 	return nil
 }
