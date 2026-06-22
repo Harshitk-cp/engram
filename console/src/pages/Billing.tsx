@@ -4,6 +4,43 @@ import { Layout } from "../components/Layout";
 import { useAsync } from "../hooks";
 import { AsyncView } from "../components/ui";
 
+// Razorpay Checkout is loaded on demand from their CDN (it injects window.Razorpay).
+interface RazorpaySuccess {
+  razorpay_payment_id: string;
+  razorpay_subscription_id: string;
+  razorpay_signature: string;
+}
+interface RazorpayInstance {
+  open: () => void;
+  on: (event: string, cb: (resp: unknown) => void) => void;
+}
+declare global {
+  interface Window {
+    Razorpay: new (options: Record<string, unknown>) => RazorpayInstance;
+  }
+}
+
+const RZP_SRC = "https://checkout.razorpay.com/v1/checkout.js";
+let rzpScriptPromise: Promise<void> | null = null;
+
+// loadRazorpay injects the Checkout script once (promise-cached) and resolves when
+// window.Razorpay is available.
+function loadRazorpay(): Promise<void> {
+  if (typeof window !== "undefined" && window.Razorpay) return Promise.resolve();
+  if (rzpScriptPromise) return rzpScriptPromise;
+  rzpScriptPromise = new Promise<void>((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = RZP_SRC;
+    s.onload = () => resolve();
+    s.onerror = () => {
+      rzpScriptPromise = null;
+      reject(new Error("Failed to load Razorpay Checkout"));
+    };
+    document.body.appendChild(s);
+  });
+  return rzpScriptPromise;
+}
+
 const PLAN_LABELS: Record<string, string> = {
   free: "Free",
   developer: "Developer",
@@ -72,18 +109,68 @@ function PlanCard({
   );
 }
 
-function BillingInner({ data }: { data: BillingState }) {
+function BillingInner({ data, reload }: { data: BillingState; reload: () => void }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  const go = async (fn: () => Promise<{ url: string }>) => {
+  // onUpgrade creates a Razorpay subscription server-side, then opens the Checkout
+  // modal. On a successful payment the signature is verified server-side and the
+  // billing state reloads; the subscription.* webhook is the authoritative source.
+  const onUpgrade = async (plan: string) => {
     setBusy(true);
     setErr(null);
     try {
-      const { url } = await fn();
-      window.location.href = url;
+      await loadRazorpay();
+      const { subscription_id, key_id } = await Api.checkout(plan);
+      const rzp = new window.Razorpay({
+        key: key_id,
+        subscription_id,
+        name: "Engram",
+        description: `${PLAN_LABELS[plan] ?? plan} plan`,
+        theme: { color: "#6366f1" },
+        handler: async (resp: RazorpaySuccess) => {
+          try {
+            await Api.verifyPayment({
+              razorpay_payment_id: resp.razorpay_payment_id,
+              razorpay_subscription_id: resp.razorpay_subscription_id,
+              razorpay_signature: resp.razorpay_signature,
+            });
+            reload();
+          } catch (e) {
+            setErr(e instanceof Error ? e.message : String(e));
+          } finally {
+            setBusy(false);
+          }
+        },
+        modal: { ondismiss: () => setBusy(false) },
+      });
+      rzp.on("payment.failed", (resp: unknown) => {
+        const r = resp as { error?: { description?: string } };
+        setErr(r?.error?.description ?? "Payment failed");
+        setBusy(false);
+      });
+      rzp.open();
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
+      setBusy(false);
+    }
+  };
+
+  const onCancel = async () => {
+    if (
+      !window.confirm(
+        "Cancel your subscription? You'll keep access until the end of the current billing period, then drop to the Free plan.",
+      )
+    )
+      return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await Api.cancelSubscription();
+      reload();
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
       setBusy(false);
     }
   };
@@ -115,9 +202,9 @@ function BillingInner({ data }: { data: BillingState }) {
               )}
             </div>
           </div>
-          {data.billing_enabled && data.plan !== "free" && (
-            <button className="secondary" disabled={busy} onClick={() => go(Api.billingPortal)}>
-              Manage subscription
+          {data.billing_enabled && data.plan !== "free" && data.subscription_status !== "canceled" && (
+            <button className="secondary" disabled={busy} onClick={onCancel}>
+              Cancel subscription
             </button>
           )}
         </div>
@@ -137,12 +224,12 @@ function BillingInner({ data }: { data: BillingState }) {
                 option={p}
                 current={p.plan === data.plan}
                 busy={busy}
-                onUpgrade={(plan) => go(() => Api.checkout(plan))}
+                onUpgrade={onUpgrade}
               />
             ))}
           </div>
           <p className="secondary" style={{ marginTop: 16, fontSize: "0.85rem" }}>
-            Need more, SSO, or a self-hosted deployment? <a href="mailto:sales@engram.to">Contact us</a> about Enterprise.
+            Need more, SSO, or a self-hosted deployment? <a href="mailto:sales@hakuya.ai">Contact us</a> about Enterprise.
           </p>
         </>
       )}
@@ -154,7 +241,7 @@ export default function Billing() {
   const state = useAsync(() => Api.billing(), []);
   return (
     <Layout title="Billing">
-      <AsyncView state={state}>{(data) => <BillingInner data={data} />}</AsyncView>
+      <AsyncView state={state}>{(data) => <BillingInner data={data} reload={state.reload} />}</AsyncView>
     </Layout>
   );
 }

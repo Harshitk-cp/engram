@@ -33,7 +33,7 @@ func NewAnthropicClient(apiKey string) *AnthropicClient {
 	return &AnthropicClient{
 		apiKey:     apiKey,
 		model:      model,
-		httpClient: &http.Client{},
+		httpClient: &http.Client{Timeout: defaultLLMHTTPTimeout},
 	}
 }
 

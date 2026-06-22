@@ -218,9 +218,19 @@ export const Api = {
   rejectQuarantine: (id: string, note?: string) =>
     req<void>(`/v1/quarantine/${id}/reject`, { method: "POST", body: JSON.stringify({ note: note ?? "" }) }),
 
-  // Billing (managed cloud)
+  // Billing (managed cloud, Razorpay)
   billing: () => req<BillingState>("/v1/billing/"),
+  // Creates a Razorpay subscription; the browser opens the Checkout modal with these.
   checkout: (plan: string) =>
-    req<{ url: string }>("/v1/billing/checkout", { method: "POST", body: JSON.stringify({ plan }) }),
-  billingPortal: () => req<{ url: string }>("/v1/billing/portal", { method: "POST" }),
+    req<{ subscription_id: string; key_id: string }>("/v1/billing/checkout", {
+      method: "POST",
+      body: JSON.stringify({ plan }),
+    }),
+  // Confirms the payment signature returned by the Checkout modal's success handler.
+  verifyPayment: (p: {
+    razorpay_payment_id: string;
+    razorpay_subscription_id: string;
+    razorpay_signature: string;
+  }) => req<{ ok: boolean }>("/v1/billing/verify", { method: "POST", body: JSON.stringify(p) }),
+  cancelSubscription: () => req<{ ok: boolean }>("/v1/billing/cancel", { method: "POST" }),
 };

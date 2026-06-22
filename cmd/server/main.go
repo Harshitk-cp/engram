@@ -30,11 +30,23 @@ func main() {
 
 	ctx := context.Background()
 
-	pool, err := pgxpool.New(ctx, dbURL)
+	poolCfg, err := pgxpool.ParseConfig(dbURL)
+	if err != nil {
+		logger.Fatal("invalid DATABASE_URL", zap.Error(err))
+	}
+	poolCfg.MaxConns = config.DBMaxConns()
+	poolCfg.MinConns = config.DBMinConns()
+	poolCfg.MaxConnLifetime = config.DBMaxConnLifetime()
+	poolCfg.MaxConnIdleTime = config.DBMaxConnIdleTime()
+
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		logger.Fatal("failed to connect to database", zap.Error(err))
 	}
 	defer pool.Close()
+	logger.Info("database pool configured",
+		zap.Int32("max_conns", poolCfg.MaxConns),
+		zap.Int32("min_conns", poolCfg.MinConns))
 
 	if err := pool.Ping(ctx); err != nil {
 		logger.Fatal("failed to ping database", zap.Error(err))

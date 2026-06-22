@@ -8,7 +8,13 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
+
+// defaultEmbeddingHTTPTimeout bounds outbound embedding calls so a stalled
+// provider can't pin the request goroutine (embeddings run on the memory
+// create/recall hot path).
+const defaultEmbeddingHTTPTimeout = 60 * time.Second
 
 // CompatibleClient talks to any OpenAI-compatible /embeddings endpoint: a local
 // Ollama / vLLM / Text-Embeddings-Inference server, a gateway (LiteLLM), or a
@@ -38,7 +44,7 @@ func NewCompatibleClient(baseURL, apiKey, model string, dimensions int) *Compati
 		apiKey:     apiKey,
 		model:      model,
 		dimensions: dimensions,
-		httpClient: &http.Client{},
+		httpClient: &http.Client{Timeout: defaultEmbeddingHTTPTimeout},
 	}
 }
 

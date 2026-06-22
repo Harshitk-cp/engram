@@ -65,7 +65,7 @@ type Episode struct {
 	// Temporal context
 	OccurredAt      time.Time `json:"occurred_at"`
 	DurationSeconds *int      `json:"duration_seconds,omitempty"`
-	TimeOfDay       string    `json:"time_of_day,omitempty"
+	TimeOfDay       string    `json:"time_of_day,omitempty"`
 	DayOfWeek       string    `json:"day_of_week,omitempty"`
 
 	// Emotional markers

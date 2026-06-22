@@ -18,6 +18,11 @@ const (
 	cerebrasModel  = "gpt-oss-120b"
 )
 
+// defaultLLMHTTPTimeout bounds every outbound LLM call. Without it a stalled
+// provider would pin a goroutine (and, on the create/recall hot path, a request)
+// indefinitely and eventually exhaust the server. Shared by all LLM clients.
+const defaultLLMHTTPTimeout = 120 * time.Second
+
 type CerebrasClient struct {
 	apiKey     string
 	httpClient *http.Client
@@ -26,7 +31,7 @@ type CerebrasClient struct {
 func NewCerebrasClient(apiKey string) *CerebrasClient {
 	return &CerebrasClient{
 		apiKey:     apiKey,
-		httpClient: &http.Client{Timeout: 120 * time.Second},
+		httpClient: &http.Client{Timeout: defaultLLMHTTPTimeout},
 	}
 }
 

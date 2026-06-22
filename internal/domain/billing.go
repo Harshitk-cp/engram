@@ -22,7 +22,7 @@ const (
 
 // PlanLimits are the hard caps enforced per org per billing period. A limit of
 // -1 means unlimited. PriceUSD is the monthly list price, used for console display
-// only — the authoritative price lives in Stripe.
+// only — the authoritative price lives in the Razorpay plan.
 type PlanLimits struct {
 	MaxAgents           int   `json:"max_agents"`
 	MaxMemoriesPerMonth int64 `json:"max_memories_per_month"`
@@ -55,7 +55,7 @@ func (p Plan) Valid() bool {
 	return ok
 }
 
-// SelfServe reports whether a plan can be purchased via Stripe Checkout. Free is
+// SelfServe reports whether a plan can be purchased via Razorpay Checkout. Free is
 // the default (no purchase) and Enterprise is sales-assisted (set manually).
 func (p Plan) SelfServe() bool {
 	return p == PlanDeveloper || p == PlanTeam || p == PlanGrowth
@@ -63,11 +63,11 @@ func (p Plan) SelfServe() bool {
 
 // Billing is an org's subscription state.
 type Billing struct {
-	TenantID             uuid.UUID `json:"tenant_id"`
-	Plan                 Plan      `json:"plan"`
-	SubscriptionStatus   string    `json:"subscription_status"`
-	StripeCustomerID     string    `json:"-"`
-	StripeSubscriptionID string    `json:"-"`
+	TenantID               uuid.UUID `json:"tenant_id"`
+	Plan                   Plan      `json:"plan"`
+	SubscriptionStatus     string    `json:"subscription_status"`
+	RazorpayCustomerID     string    `json:"-"`
+	RazorpaySubscriptionID string    `json:"-"`
 }
 
 // Usage is an org's metered consumption for a single billing period.
@@ -79,15 +79,13 @@ type Usage struct {
 
 // BillingStore persists per-org plan state and monthly usage counters.
 type BillingStore interface {
-	// GetBilling returns the org's current plan + Stripe references.
+	// GetBilling returns the org's current plan + Razorpay references.
 	GetBilling(ctx context.Context, tenantID uuid.UUID) (*Billing, error)
-	// GetByStripeCustomer resolves the org owning a Stripe customer (webhook path).
-	GetByStripeCustomer(ctx context.Context, customerID string) (*Billing, error)
-	// SetStripeCustomer records the Stripe customer id created at checkout.
-	SetStripeCustomer(ctx context.Context, tenantID uuid.UUID, customerID string) error
-	// SetSubscription updates plan + status + subscription id from a Stripe event.
+	// SetRazorpayCustomer records the Razorpay customer id seen on a webhook.
+	SetRazorpayCustomer(ctx context.Context, tenantID uuid.UUID, customerID string) error
+	// SetSubscription updates plan + status + subscription id from a Razorpay event.
 	SetSubscription(ctx context.Context, tenantID uuid.UUID, plan Plan, status, subscriptionID string) error
-	// SetPlan sets the plan directly without Stripe (manual/enterprise contracts).
+	// SetPlan sets the plan directly without Razorpay (manual/enterprise contracts).
 	SetPlan(ctx context.Context, tenantID uuid.UUID, plan Plan, status string) error
 
 	// CurrentUsage returns usage for the current UTC month (zeroed if none yet).

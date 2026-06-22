@@ -111,7 +111,7 @@ func (h *CanonHandler) List(w http.ResponseWriter, r *http.Request) {
 	limit := 100
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if n, err := strconv.Atoi(l); err == nil && n > 0 {
-			limit = n
+			limit = clampLimit(n)
 		}
 	}
 	memories, err := h.memories.ListCanon(r.Context(), tenant.ID, limit)

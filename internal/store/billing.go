@@ -40,29 +40,23 @@ func (s *BillingStore) scanBilling(row pgx.Row) (*domain.Billing, error) {
 	}
 	b.Plan = domain.Plan(plan)
 	if customerID != nil {
-		b.StripeCustomerID = *customerID
+		b.RazorpayCustomerID = *customerID
 	}
 	if subscriptionID != nil {
-		b.StripeSubscriptionID = *subscriptionID
+		b.RazorpaySubscriptionID = *subscriptionID
 	}
 	return b, nil
 }
 
 func (s *BillingStore) GetBilling(ctx context.Context, tenantID uuid.UUID) (*domain.Billing, error) {
 	return s.scanBilling(s.db.QueryRow(ctx,
-		`SELECT id, plan, subscription_status, stripe_customer_id, stripe_subscription_id
+		`SELECT id, plan, subscription_status, razorpay_customer_id, razorpay_subscription_id
 		   FROM tenants WHERE id = $1`, tenantID))
 }
 
-func (s *BillingStore) GetByStripeCustomer(ctx context.Context, customerID string) (*domain.Billing, error) {
-	return s.scanBilling(s.db.QueryRow(ctx,
-		`SELECT id, plan, subscription_status, stripe_customer_id, stripe_subscription_id
-		   FROM tenants WHERE stripe_customer_id = $1`, customerID))
-}
-
-func (s *BillingStore) SetStripeCustomer(ctx context.Context, tenantID uuid.UUID, customerID string) error {
+func (s *BillingStore) SetRazorpayCustomer(ctx context.Context, tenantID uuid.UUID, customerID string) error {
 	_, err := s.db.Exec(ctx,
-		`UPDATE tenants SET stripe_customer_id = $2, updated_at = NOW() WHERE id = $1`,
+		`UPDATE tenants SET razorpay_customer_id = $2, updated_at = NOW() WHERE id = $1`,
 		tenantID, customerID)
 	return err
 }
@@ -70,7 +64,7 @@ func (s *BillingStore) SetStripeCustomer(ctx context.Context, tenantID uuid.UUID
 func (s *BillingStore) SetSubscription(ctx context.Context, tenantID uuid.UUID, plan domain.Plan, status, subscriptionID string) error {
 	_, err := s.db.Exec(ctx,
 		`UPDATE tenants
-		    SET plan = $2, subscription_status = $3, stripe_subscription_id = $4,
+		    SET plan = $2, subscription_status = $3, razorpay_subscription_id = $4,
 		        plan_period_start = NOW(), updated_at = NOW()
 		  WHERE id = $1`,
 		tenantID, string(plan), status, subscriptionID)

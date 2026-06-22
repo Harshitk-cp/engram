@@ -97,7 +97,7 @@ func (h *AnchorHandler) List(w http.ResponseWriter, r *http.Request) {
 	limit := 100
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if n, err := strconv.Atoi(l); err == nil && n > 0 {
-			limit = n
+			limit = clampLimit(n)
 		}
 	}
 
@@ -147,7 +147,7 @@ func (h *AnchorHandler) ListMemories(w http.ResponseWriter, r *http.Request) {
 	limit := 100
 	if l := r.URL.Query().Get("limit"); l != "" {
 		if n, err := strconv.Atoi(l); err == nil && n > 0 {
-			limit = n
+			limit = clampLimit(n)
 		}
 	}
 	memories, err := h.memories.ListByAnchor(r.Context(), id, tenant.ID, limit)

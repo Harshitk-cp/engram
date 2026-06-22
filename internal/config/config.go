@@ -5,9 +5,31 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
+
+// envInt32 reads a positive int32 env var, falling back to def.
+func envInt32(key string, def int32) int32 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return int32(n)
+		}
+	}
+	return def
+}
+
+// envDurationSecs reads an env var holding a number of seconds, falling back to
+// defSecs. A value of 0 is honored (e.g. "no max lifetime").
+func envDurationSecs(key string, defSecs int) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return time.Duration(defSecs) * time.Second
+}
 
 // Load reads the .env file specified by ENGRAM_ENV (or .env by default),
 // then loads the corresponding .secret file if it exists.
@@ -250,36 +272,64 @@ func WorkOSAuth() (string, string) {
 // recipient can confirm an export came from this server. Empty = unsigned export.
 func AuditSigningKey() string { return os.Getenv("AUDIT_SIGNING_KEY") }
 
-// ---- Billing / managed cloud (Stripe) ----
+// ---- Billing / managed cloud (Razorpay) ----
 
-// StripeSecretKey is the Stripe API secret. When empty, billing is disabled:
-// the checkout/portal/webhook endpoints report "not configured" and quota
-// enforcement is a no-op, so self-hosted/OSS deployments run unmetered.
-func StripeSecretKey() string { return strings.TrimSpace(os.Getenv("STRIPE_SECRET_KEY")) }
+// RazorpayKeyID is the public Razorpay API key id (also handed to the browser to
+// open the Checkout modal).
+func RazorpayKeyID() string { return strings.TrimSpace(os.Getenv("RAZORPAY_KEY_ID")) }
 
-// StripeWebhookSecret verifies the signature on incoming Stripe webhook events.
-func StripeWebhookSecret() string { return strings.TrimSpace(os.Getenv("STRIPE_WEBHOOK_SECRET")) }
+// RazorpayKeySecret is the Razorpay API key secret used for server-side API calls
+// and payment-signature verification.
+func RazorpayKeySecret() string { return strings.TrimSpace(os.Getenv("RAZORPAY_KEY_SECRET")) }
+
+// RazorpayWebhookSecret verifies the signature on incoming Razorpay webhook events.
+func RazorpayWebhookSecret() string { return strings.TrimSpace(os.Getenv("RAZORPAY_WEBHOOK_SECRET")) }
 
 // BillingEnabled reports whether managed-cloud billing + quota enforcement is on.
-// Gated solely on a Stripe secret being configured.
-func BillingEnabled() bool { return StripeSecretKey() != "" }
+// Gated on a Razorpay key id + secret being configured; when unset the
+// checkout/verify/cancel/webhook endpoints report "not configured" and quota
+// enforcement is a no-op, so self-hosted/OSS deployments run unmetered.
+func BillingEnabled() bool { return RazorpayKeyID() != "" && RazorpayKeySecret() != "" }
 
-// StripePriceIDs maps the self-serve plan names to their Stripe Price IDs,
-// created in the Stripe dashboard. Plans without a configured price can't be
+// RazorpayPlanIDs maps the self-serve plan names to their Razorpay Plan IDs,
+// created in the Razorpay dashboard. Plans without a configured plan id can't be
 // purchased via checkout.
-func StripePriceIDs() map[string]string {
+func RazorpayPlanIDs() map[string]string {
 	m := map[string]string{}
-	if v := strings.TrimSpace(os.Getenv("STRIPE_PRICE_DEVELOPER")); v != "" {
+	if v := strings.TrimSpace(os.Getenv("RAZORPAY_PLAN_DEVELOPER")); v != "" {
 		m["developer"] = v
 	}
-	if v := strings.TrimSpace(os.Getenv("STRIPE_PRICE_TEAM")); v != "" {
+	if v := strings.TrimSpace(os.Getenv("RAZORPAY_PLAN_TEAM")); v != "" {
 		m["team"] = v
 	}
-	if v := strings.TrimSpace(os.Getenv("STRIPE_PRICE_GROWTH")); v != "" {
+	if v := strings.TrimSpace(os.Getenv("RAZORPAY_PLAN_GROWTH")); v != "" {
 		m["growth"] = v
 	}
 	return m
 }
+
+// ---- Database connection pool ----
+//
+// pgx's default pool maxes at 4 connections, which starves a busy server (every
+// recall, decay pass, and background worker competes for them). These knobs let
+// operators size the pool to their Postgres without needing PgBouncer for
+// small-to-mid deployments.
+
+// DBMaxConns caps the pgx pool size. Override with DB_MAX_CONNS. Default 25.
+func DBMaxConns() int32 { return envInt32("DB_MAX_CONNS", 25) }
+
+// DBMinConns is the warm floor of connections kept open. Override with
+// DB_MIN_CONNS. Default 2.
+func DBMinConns() int32 { return envInt32("DB_MIN_CONNS", 2) }
+
+// DBMaxConnLifetime recycles a connection after this long (guards against
+// server-side connection state drift / load-balancer staleness). Override with
+// DB_MAX_CONN_LIFETIME_SECS. Default 1h.
+func DBMaxConnLifetime() time.Duration { return envDurationSecs("DB_MAX_CONN_LIFETIME_SECS", 3600) }
+
+// DBMaxConnIdleTime closes a connection idle this long, returning it to Postgres.
+// Override with DB_MAX_CONN_IDLE_SECS. Default 30m.
+func DBMaxConnIdleTime() time.Duration { return envDurationSecs("DB_MAX_CONN_IDLE_SECS", 1800) }
 
 // LogLevel returns the log level (debug, info, warn, error).
 // Defaults to "info" if not set.

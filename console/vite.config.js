@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-// Served at the site root by the Go binary (e.g. console.engram.to). In dev,
+// Served at the site root by the Go binary (e.g. console.hakuya.ai). In dev,
 // requests to /v1 and /auth are proxied to the local API server.
 export default defineConfig({
     base: "/",

@@ -25,7 +25,7 @@ type OpenAIClient struct {
 func NewOpenAIClient(apiKey string) *OpenAIClient {
 	return &OpenAIClient{
 		apiKey:     apiKey,
-		httpClient: &http.Client{},
+		httpClient: &http.Client{Timeout: defaultLLMHTTPTimeout},
 	}
 }
 
