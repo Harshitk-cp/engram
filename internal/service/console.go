@@ -90,6 +90,7 @@ func (s *ConsoleService) Memories(ctx context.Context, agentID, tenantID uuid.UU
 	if items == nil {
 		items = []domain.Memory{}
 	}
+	domain.AnnotateTiers(items)
 	return &MemoryPage{Items: items, Total: total, Limit: limit, Offset: offset}, nil
 }
 
@@ -108,6 +109,9 @@ func (s *ConsoleService) SnapshotAsOf(ctx context.Context, agentID, tenantID uui
 	}
 	if beliefs == nil {
 		beliefs = []domain.BeliefAtTime{}
+	}
+	for i := range beliefs {
+		beliefs[i].Tier = domain.ComputeTier(float64(beliefs[i].Confidence))
 	}
 	return &Snapshot{AsOf: at, Total: total, Beliefs: beliefs}, nil
 }

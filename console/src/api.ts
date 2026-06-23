@@ -39,7 +39,7 @@ export interface Dashboard {
   learning_velocity?: number; stability_score?: number;
 }
 export interface Memory {
-  id: string; content: string; type: string; confidence: number;
+  id: string; content: string; type: string; confidence: number; tier?: string;
   binding?: string; provenance?: string; reinforcement_count?: number;
   created_at?: string; updated_at?: string;
 }
@@ -59,7 +59,7 @@ export interface ContradictionPair {
   belief_id: string; belief_content: string; belief_confidence: number;
   other_id: string; other_content: string; other_confidence: number; detected_at: string;
 }
-export interface BeliefAtTime { id: string; content: string; type: string; confidence: number; created_at: string; }
+export interface BeliefAtTime { id: string; content: string; type: string; confidence: number; tier?: string; created_at: string; }
 export interface Snapshot { as_of: string; total: number; beliefs: BeliefAtTime[]; }
 export interface AuditStatus {
   valid: boolean; checked: number; break_seq?: number | null;

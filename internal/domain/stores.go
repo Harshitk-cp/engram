@@ -79,8 +79,9 @@ type BeliefAtTime struct {
 	ID         uuid.UUID `json:"id"`
 	Content    string    `json:"content"`
 	Type       string    `json:"type"`
-	Confidence float32   `json:"confidence"`
-	CreatedAt  time.Time `json:"created_at"`
+	Confidence float32    `json:"confidence"`
+	Tier       MemoryTier `json:"tier,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
 }
 
 // MemoryFilter holds optional filters for listing an agent's memories. Empty

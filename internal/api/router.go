@@ -264,6 +264,17 @@ func NewApp(db *pgxpool.Pool, logger *zap.Logger) *App {
 	// Metrics (no auth)
 	r.Get("/metrics", app.metricsHandler())
 
+	// Embedded MCP endpoint (Streamable HTTP). Lets any MCP client connect with
+	// just a URL + an Engram API key — no local engram-mcp binary, no env vars:
+	//   claude mcp add --transport http engram https://<host>/mcp \
+	//     --header "Authorization: Bearer <api-key>"
+	// Authed by the same API keys as /v1 (APIKeyAuth 401s invalid keys). Tool
+	// calls reuse the full REST stack in-process (no socket, no extra port) via
+	// an in-process transport, running as the key's tenant.
+	mcpClient := &http.Client{Transport: inProcessRoundTripper{handler: r}, Timeout: 60 * time.Second}
+	mcpHandler := handlers.NewMCPHandler(mcpClient)
+	r.With(mw.APIKeyAuth(apiKeyStore)).Post("/mcp", mcpHandler.Handle)
+
 	// Sensitive unauthenticated endpoints (tenant/key minting, credential
 	// submission) get a much tighter per-IP limiter than the global default so a
 	// leaked setup token or online password guessing can't be brute-forced at
@@ -503,7 +514,7 @@ func NewRouter(db *pgxpool.Pool, logger *zap.Logger) *chi.Mux {
 // under an API namespace, which get a JSON 404 so clients don't receive the HTML
 // shell in place of an error.
 func spaFallback(spa http.Handler) http.HandlerFunc {
-	apiPrefixes := []string{"/v1", "/auth", "/health", "/metrics"}
+	apiPrefixes := []string{"/v1", "/auth", "/health", "/metrics", "/mcp"}
 	return func(w http.ResponseWriter, r *http.Request) {
 		for _, p := range apiPrefixes {
 			if r.URL.Path == p || strings.HasPrefix(r.URL.Path, p+"/") {

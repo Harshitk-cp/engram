@@ -28,6 +28,18 @@ func ComputeTier(confidence float64) MemoryTier {
 	}
 }
 
+// AnnotateTiers fills each memory's derived Tier from its Confidence, making the
+// API the single source of truth for tiering. Clients should display this rather
+// than re-deriving from confidence: the stored confidence is float4, and
+// re-bucketing the JSON-rounded value in another language disagrees with the
+// server at the band boundaries (e.g. a 0.85 stored as ~0.8500000238 is "hot"
+// here but "warm" if JS compares the rounded 0.85 against the same threshold).
+func AnnotateTiers(memories []Memory) {
+	for i := range memories {
+		memories[i].Tier = ComputeTier(float64(memories[i].Confidence))
+	}
+}
+
 type TierBehavior struct {
 	Tier               MemoryTier
 	AutoInject         bool

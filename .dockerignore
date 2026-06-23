@@ -1,0 +1,11 @@
+.git
+.github
+node_modules
+console/node_modules
+console/dist
+*.test
+coverage.txt
+# Local dev binaries (untracked)
+engram-mcp
+01_learning_agent
+02_memory_evolution_demo

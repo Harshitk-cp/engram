@@ -109,6 +109,14 @@ func RateLimit(rps float64, burst int) func(http.Handler) http.Handler {
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// In-process calls (e.g. the embedded MCP endpoint dispatching to the
+			// REST stack) are already bounded by the external request that
+			// triggered them, which was limited at the edge. Don't double-limit —
+			// and never let MCP fan-out share one bucket keyed by the loopback.
+			if IsInternal(r.Context()) {
+				next.ServeHTTP(w, r)
+				return
+			}
 			if !limiter.Allow(clientIP(r)) {
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Retry-After", "1")

@@ -1,4 +1,19 @@
-# Build stage
+# Stage 1: build the React/Vite console → dist/ (JS + CSS assets).
+# Done inside Docker so the embedded console is always present and consistent;
+# we no longer depend on committing build artifacts (console/dist is gitignored).
+FROM node:20-alpine AS console
+
+WORKDIR /console
+
+# Install deps against the lockfile first for layer caching.
+COPY console/package.json console/package-lock.json ./
+RUN npm ci
+
+# Build the SPA (vite emptyOutDir cleans dist/ → fresh, hash-consistent assets).
+COPY console/ ./
+RUN npm run build
+
+# Stage 2: build the Go binary, embedding the freshly built console.
 FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
@@ -13,10 +28,14 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Tidy modules and build the binary
+# Overlay the freshly built console over whatever's in the build context
+# (the committed console/dist is stale/incomplete because dist/ is gitignored).
+COPY --from=console /console/dist ./console/dist
+
+# Tidy modules and build the binary (go:embed all:dist picks up the real assets)
 RUN go mod tidy && CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /engram ./cmd/server/
 
-# Final stage
+# Stage 3: minimal runtime
 FROM alpine:3.19
 
 WORKDIR /app
@@ -28,10 +47,8 @@ RUN apk add --no-cache ca-certificates tzdata
 RUN addgroup -g 1000 engram && \
     adduser -u 1000 -G engram -s /bin/sh -D engram
 
-# Copy binary from builder
+# Copy binary and migrations from builder
 COPY --from=builder /engram /app/engram
-
-# Copy migrations
 COPY --from=builder /app/migrations /app/migrations
 
 # Set ownership
