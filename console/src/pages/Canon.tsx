@@ -92,7 +92,7 @@ export default function Canon() {
               <thead><tr><th>Fact</th><th>Type</th><th>Tier</th><th>Confidence</th><th></th></tr></thead>
               <tbody>
                 {items.map((m) => {
-                  const t = tierOf(m.confidence);
+                  const t = m.tier ?? tierOf(m.confidence);
                   return (
                     <tr key={m.id}>
                       <td style={{ maxWidth: 480 }}>{m.content}</td>

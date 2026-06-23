@@ -167,6 +167,11 @@ type Memory struct {
 	// QuarantineReason / QuarantinedAt are set when the firewall holds a trace.
 	QuarantineReason string     `json:"quarantine_reason,omitempty"`
 	QuarantinedAt    *time.Time `json:"quarantined_at,omitempty"`
+
+	// Tier is derived from Confidence (not a stored column). Populated on read
+	// for UI display so the server is the single source of truth for tiering;
+	// omitted when unset. See AnnotateTiers.
+	Tier MemoryTier `json:"tier,omitempty"`
 }
 
 type ConversationIngestRequest struct {

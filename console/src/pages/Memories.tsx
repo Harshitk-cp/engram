@@ -77,7 +77,7 @@ export default function Memories() {
                 </thead>
                 <tbody>
                   {d.items.map((m) => {
-                    const t = tierOf(m.confidence);
+                    const t = m.tier ?? tierOf(m.confidence);
                     return (
                       <tr key={m.id}>
                         <td style={{ maxWidth: 420 }}>{displayContent(m.content)}</td>

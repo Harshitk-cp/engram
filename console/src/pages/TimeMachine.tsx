@@ -70,7 +70,7 @@ export default function TimeMachine() {
                   <thead><tr><th>Belief</th><th>Type</th><th>Tier then</th><th>Confidence then</th></tr></thead>
                   <tbody>
                     {snap.beliefs.map((b) => {
-                      const t = tierOf(b.confidence);
+                      const t = b.tier ?? tierOf(b.confidence);
                       return (
                         <tr key={b.id}>
                           <td style={{ maxWidth: 460 }}>

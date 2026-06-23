@@ -31,6 +31,18 @@ func NewClient(baseURL, apiKey, agentID string) *Client {
 	}
 }
 
+// NewClientWithHTTP is like NewClient but uses the supplied *http.Client. The
+// embedded MCP endpoint passes a client backed by an in-process transport so
+// tool calls reuse the REST stack without a network hop. A nil hc falls back to
+// the default client.
+func NewClientWithHTTP(baseURL, apiKey, agentID string, hc *http.Client) *Client {
+	c := NewClient(baseURL, apiKey, agentID)
+	if hc != nil {
+		c.http = hc
+	}
+	return c
+}
+
 func (c *Client) AgentID() string { return c.agentID }
 
 // MemoryResult is returned by Remember.

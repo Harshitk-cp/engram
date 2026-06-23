@@ -153,3 +153,40 @@ func TestGetTierBehavior_UnknownTier(t *testing.T) {
 		t.Errorf("unknown tier should fall back to archive behavior, got %v", b.Tier)
 	}
 }
+
+// Memories are stored in a float4 (REAL) column, so a "round" 0.85 reads back as
+// float32(0.85) ≈ 0.8500000238 — which Postgres buckets as hot (> 0.85). When the
+// server hands that stored value to ComputeTier it must agree, so the Beliefs
+// browser (which now displays the server-computed tier) matches the dashboard's
+// SQL tier counts instead of re-bucketing a JSON-rounded 0.85 to warm in JS.
+func TestComputeTier_StoredFloat32Boundary(t *testing.T) {
+	cases := []struct {
+		stored float32
+		want   MemoryTier
+	}{
+		{0.85, TierHot},  // float32(0.85) rounds up past 0.85 — hot, like the SQL
+		{0.95, TierHot},
+		{0.80, TierWarm},
+		{0.75, TierWarm},
+		{0.70, TierCold}, // float32(0.70) rounds down below 0.70 — cold, like the SQL
+		{0.50, TierCold},
+		{0.30, TierArchive},
+	}
+	for _, c := range cases {
+		if got := ComputeTier(float64(c.stored)); got != c.want {
+			t.Errorf("ComputeTier(float64(float32(%v))=%v) = %q, want %q",
+				c.stored, float64(c.stored), got, c.want)
+		}
+	}
+}
+
+func TestAnnotateTiers(t *testing.T) {
+	mems := []Memory{{Confidence: 0.85}, {Confidence: 0.80}, {Confidence: 0.70}, {Confidence: 0.30}}
+	AnnotateTiers(mems)
+	want := []MemoryTier{TierHot, TierWarm, TierCold, TierArchive}
+	for i := range mems {
+		if mems[i].Tier != want[i] {
+			t.Errorf("mems[%d] (conf %v): Tier = %q, want %q", i, mems[i].Confidence, mems[i].Tier, want[i])
+		}
+	}
+}

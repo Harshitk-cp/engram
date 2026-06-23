@@ -119,6 +119,7 @@ func (h *CanonHandler) List(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to list canon")
 		return
 	}
+	domain.AnnotateTiers(memories)
 	writeJSON(w, http.StatusOK, map[string]any{"memories": memories, "count": len(memories)})
 }
 
