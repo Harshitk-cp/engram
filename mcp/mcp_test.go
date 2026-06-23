@@ -695,6 +695,33 @@ func TestInitialize(t *testing.T) {
 	if info["name"] != "engram" {
 		t.Errorf("wrong server name: %v", info["name"])
 	}
+	// Instructions must ship in initialize — this is what makes hosts auto-adopt
+	// Engram as memory (recall-at-start / remember-on-fact) without prompt wiring.
+	instr, ok := result["instructions"].(string)
+	if !ok || instr == "" {
+		t.Fatalf("initialize must include non-empty instructions, got %v", result["instructions"])
+	}
+	if !strings.Contains(instr, "recall") || !strings.Contains(instr, "remember") {
+		t.Errorf("instructions should direct the agent to recall and remember, got: %q", instr)
+	}
+}
+
+func TestInitialize_InstructionsDisabled(t *testing.T) {
+	t.Setenv("ENGRAM_MCP_INSTRUCTIONS", "")
+	s := mcp.NewServer("engram", "0.1.0")
+	req := &mcp.Request{
+		JSONRPC: "2.0",
+		ID:      json.RawMessage(`1`),
+		Method:  "initialize",
+		Params:  json.RawMessage(`{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0"}}`),
+	}
+	resp := s.Handle(context.Background(), req)
+	data, _ := json.Marshal(resp.Result)
+	var result map[string]interface{}
+	_ = json.Unmarshal(data, &result)
+	if _, present := result["instructions"]; present {
+		t.Errorf("instructions should be omitted when ENGRAM_MCP_INSTRUCTIONS is empty, got %v", result["instructions"])
+	}
 }
 
 func TestPing(t *testing.T) {
