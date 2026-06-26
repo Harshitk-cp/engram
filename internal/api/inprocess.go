@@ -2,8 +2,11 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
+
+	"github.com/go-chi/chi/v5"
 
 	mw "github.com/Harshitk-cp/engram/internal/api/middleware"
 )
@@ -23,7 +26,8 @@ type inProcessRoundTripper struct {
 
 func (rt inProcessRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	rec := &responseCapture{header: make(http.Header), body: new(bytes.Buffer)}
-	rt.handler.ServeHTTP(rec, req.WithContext(mw.WithInternal(req.Context())))
+	ctx := context.WithValue(mw.WithInternal(req.Context()), chi.RouteCtxKey, chi.NewRouteContext())
+	rt.handler.ServeHTTP(rec, req.WithContext(ctx))
 
 	status := rec.status
 	if status == 0 {
